@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "apple-calendar": {
+      "type": "http",
+      "url": "http://YOUR-HOST:3456/mcp",
+      "headers": { "Authorization": "Bearer YOUR-TOKEN" }
+    }
+  }
+}

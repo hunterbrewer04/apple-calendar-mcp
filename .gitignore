@@ -1,0 +1,19 @@
+.DS_Store
+*.o
+ical
+.build/
+.claude/
+.sdd-archive/
+
+# Local-only working docs — only README.md ships in the public repo.
+*.md
+!README.md
+# ...but product docs that ship with the repo stay tracked:
+!skill/**/*.md
+!examples/**/*.md
+
+# Personal, this-Mac-only migration helper (names the old launchd service) — not shipped.
+scripts/migrate.sh
+
+# Homebrew formula lives in the separate `homebrew-tap` repo; staged here for review only.
+homebrew-tap/

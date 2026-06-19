@@ -1,0 +1,17 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  build-test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (release)
+        run: swift build -c release
+      # Unit tests only (DateWindow, Renderer, CLIParsing, Auth). CI cannot grant
+      # macOS Calendar (TCC) access, so there are no live EventKit reads here. These
+      # suites also can't run on a Command Line Tools-only box (no XCTest); the
+      # macos-14 runner ships Xcode, which provides it.
+      - name: Test
+        run: swift test
