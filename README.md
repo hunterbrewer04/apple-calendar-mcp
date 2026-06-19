@@ -1,8 +1,42 @@
 # apple-calendar-mcp
 
-> A fast, **read-only** Apple Calendar tool for macOS: one native Swift binary that is both an
-> `ical` terminal CLI and an MCP server (stdio + token-gated HTTP). It reads the calendar
-> database directly through EventKit (~100ms per query) — Calendar.app never has to be running.
+> A fast, **read-only** Apple Calendar tool for macOS. One small native binary is both an
+> `ical` terminal command **and** an MCP server — so any MCP-compatible app can read your
+> calendar, locally or from another machine on your private network.
+
+It reads the macOS calendar database directly through EventKit (~100 ms per query), so
+Calendar.app never has to be open and nothing leaves your machine.
+
+- 🗓️ **Instant queries** — today, this week, a specific calendar, the next N days.
+- 🔌 **Two ways to connect** — a local `stdio` server, or an HTTP server other machines can reach.
+- 🔐 **Safe by default** — read-only, and the network server refuses to start without a token.
+- 🍺 **One-command install** — Homebrew builds, code-signs, and (optionally) runs it for you.
+
+---
+
+## Contents
+
+- [Requirements](#requirements)
+- [Install](#install)
+- [Using the `ical` command](#using-the-ical-command)
+- [Using the MCP server](#using-the-mcp-server)
+- [Connecting from another machine](#connecting-from-another-machine)
+- [Running it securely over a VPN](#running-it-securely-over-a-vpn)
+- [Configuration reference](#configuration-reference)
+- [Security model](#security-model)
+- [Build from source](#build-from-source)
+- [How it works](#how-it-works)
+- [License](#license)
+
+---
+
+## Requirements
+
+- **macOS 14 (Sonoma) or newer** — it uses EventKit's full-access API.
+- **Homebrew**, and the Xcode **Command Line Tools** (`xcode-select --install`). Full Xcode is
+  *not* required.
+
+---
 
 ## Install
 
@@ -10,11 +44,19 @@
 brew install hunterbrewer04/tap/apple-calendar
 ```
 
-This builds from source, code-signs the binary with a stable identity (so the macOS Calendar
-permission survives upgrades), and installs it as `ical`. **macOS 14+** required. On the first
-calendar read, macOS shows a one-time **"Allow Full Access"** dialog — click it.
+This builds the binary from source, installs it as `ical`, and **code-signs it with a stable
+identity** so the macOS Calendar permission keeps working across upgrades.
 
-## Quickstart (CLI)
+The **first time** the tool actually reads your calendar, macOS shows a one-time
+**“Allow Full Access”** dialog — click it. (Nothing prompts during install itself.)
+
+> **Heads-up:** if you already have another `ical` earlier in your `PATH`, Homebrew will tell you
+> it's “shadowed.” Either remove the old one, or call this build by its full path
+> (`$(brew --prefix)/bin/ical`).
+
+---
+
+## Using the `ical` command
 
 ```
 $ ical today
@@ -27,28 +69,34 @@ $ ical today
                               📅 Work
 ```
 
-### Subcommands
-
 | Command | Shows |
 |---|---|
-| `ical today` | today (default when no subcommand) |
+| `ical` / `ical today` | today (the default) |
 | `ical tomorrow` | tomorrow |
-| `ical week` | next 7 days |
-| `ical month` | next 30 days |
-| `ical next N` | next N days |
-| `ical calendars` | list calendar names |
-| `ical cal "NAME" [DAYS]` | one calendar (default 7 days) |
-| `ical detail [period]` | any period, with notes + URLs |
-| `ical debug [period]` | raw pipe-delimited output |
+| `ical week` | the next 7 days |
+| `ical month` | the next 30 days |
+| `ical next 14` | the next *N* days |
+| `ical calendars` | the names of all your calendars |
+| `ical cal "Work" 14` | one calendar by name (optional day count, default 7) |
+| `ical detail week` | any period, with notes + URLs |
+| `ical debug today` | raw, pipe-delimited output (for scripts) |
 
-Add `-x` (or `--detail`) to any command to include notes and URLs.
+Add **`-x`** (or `--detail`) to any command to include event notes and URLs.
 
-## MCP server
+> Recurring events are expanded to individual occurrences, and a multi-day event that started
+> earlier still shows up (with its original start date) for as long as it overlaps the window.
 
-The same binary speaks the Model Context Protocol, so Claude (or any MCP client) can read your
-calendar through the same EventKit core.
+---
 
-### stdio (local client)
+## Using the MCP server
+
+The same binary speaks the **Model Context Protocol (MCP)**, so an AI assistant or any
+MCP-compatible app can call it as a tool. There are two modes.
+
+### Mode 1 — Local (`stdio`)
+
+Best when the app runs on the **same Mac**. The app launches the binary and talks to it over its
+standard input/output — no network, no token. Add this to your MCP client's config file:
 
 ```json
 {
@@ -58,110 +106,247 @@ calendar through the same EventKit core.
 }
 ```
 
-### HTTP (remote client over a private network)
+### Mode 2 — Networked (HTTP)
 
-Run the server — a bearer token is **required** (see [Security](#security)):
+Best when the app runs on a **different machine** (see
+[Connecting from another machine](#connecting-from-another-machine)). The binary runs as a small
+HTTP server; clients authenticate with a bearer **token**.
+
+Start it by hand to try it out:
 
 ```bash
-export CALENDAR_MCP_TOKEN="$(openssl rand -hex 16)"
-ical mcp --http            # binds 127.0.0.1:3456 by default
+export CALENDAR_MCP_TOKEN="$(openssl rand -hex 16)"   # generate a token
+ical mcp --http                                       # listens on 127.0.0.1:3456
 ```
 
-Then point a remote client at it (a ready-to-edit copy is in
-[`examples/mcp-config.json`](examples/mcp-config.json)):
+> The HTTP server is **fail-closed**: with no token set it refuses to start. (You can pass
+> `--no-auth` to override that, but only on a fully trusted, isolated interface.)
+
+### Run it in the background
+
+To keep the HTTP server running and restart it at login, use Homebrew's service manager. Because
+the server needs the token in its environment, set it first with `launchctl setenv`:
+
+```bash
+# 1. generate a token and make it visible to background services
+launchctl setenv CALENDAR_MCP_TOKEN "$(openssl rand -hex 16)"
+
+# 2. start the service
+brew services start apple-calendar
+```
+
+Check it's up (a request **without** the token should be rejected with `401`):
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:3456/mcp \
+  -H 'Accept: application/json, text/event-stream' -d '{}'      # → 401
+```
+
+Manage it with `brew services list`, `brew services restart apple-calendar`, and
+`brew services stop apple-calendar`. Logs go to `$(brew --prefix)/var/log/apple-calendar.log`.
+
+### Available tools
+
+| Tool | What it returns |
+|---|---|
+| `list_calendars` | the names of all calendars |
+| `get_today` / `get_tomorrow` | a single day |
+| `get_week` / `get_month` | the next 7 / 30 days |
+| `get_next_days(days)` | the next *N* days |
+| `get_calendar_events(calendar_name, days)` | one calendar by name |
+
+Every tool also accepts `details: true` to include notes and URLs. Output is the same readable
+text the CLI prints.
+
+---
+
+## Connecting from another machine
+
+You can read your Mac's calendar from a laptop, server, or phone — as long as both devices are on
+the same **private network** (see the VPN section below; never expose this to the open internet).
+
+There are two sides to set up.
+
+### On the Mac (the server)
+
+1. **Generate a token** and make it available to the background service:
+
+   ```bash
+   TOKEN="$(openssl rand -hex 16)"
+   echo "$TOKEN"                                   # copy this — you'll need it on the other machine
+   launchctl setenv CALENDAR_MCP_TOKEN "$TOKEN"
+   ```
+
+2. **Bind the server to your private-network address** instead of `127.0.0.1`, so other machines
+   can reach it. (With a VPN this is your VPN IP — see below.)
+
+   ```bash
+   launchctl setenv CALENDAR_MCP_HOST "100.x.y.z"   # your Mac's private/VPN address
+   brew services restart apple-calendar
+   ```
+
+### On the other machine (the client)
+
+Point your MCP client at the Mac's address and include the **same token** as a bearer header:
 
 ```json
 {
   "mcpServers": {
     "apple-calendar": {
       "type": "http",
-      "url": "http://YOUR-HOST:3456/mcp",
+      "url": "http://YOUR-MAC-IP:3456/mcp",
       "headers": { "Authorization": "Bearer YOUR-TOKEN" }
     }
   }
 }
 ```
 
-### Run it as a background service
+A copy you can edit is in [`examples/mcp-config.json`](examples/mcp-config.json).
 
-`brew services` launches a launchd agent. Because the server is fail-closed, the token has to
-reach the service environment — inject it with `launchctl setenv` before starting:
-
-```bash
-launchctl setenv CALENDAR_MCP_TOKEN "$(openssl rand -hex 16)"
-brew services start apple-calendar
-```
-
-To expose it on a private-network address (e.g. a Tailscale IP) instead of loopback:
+**Quick test from the other machine:**
 
 ```bash
-launchctl setenv CALENDAR_MCP_HOST "$(tailscale ip -4)"
-brew services restart apple-calendar
+# no token → 401 (good: it's locked)
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://YOUR-MAC-IP:3456/mcp \
+  -H 'Accept: application/json, text/event-stream' -d '{}'
+
+# with token → an initialize response
+curl -s -X POST http://YOUR-MAC-IP:3456/mcp \
+  -H 'Authorization: Bearer YOUR-TOKEN' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}'
 ```
 
-### Tools
+---
 
-`list_calendars`, `get_today`, `get_tomorrow`, `get_week`, `get_month`,
-`get_next_days(days)`, `get_calendar_events(calendar_name, days)`. Each accepts an optional
-`details: bool`. Output is the same pretty text the CLI prints.
+## Running it securely over a VPN
 
-## Configuration
+The HTTP server speaks **plain HTTP with no transport encryption**, and it grants read access to
+your whole calendar. **Do not expose port 3456 to the public internet.** Instead, put both
+machines on a private VPN and bind the server to the VPN interface. Two good options:
 
-| Env var | Default | Meaning |
-|---|---|---|
-| `CALENDAR_MCP_TOKEN` | — | Bearer token; required for HTTP mode |
-| `CALENDAR_MCP_HOST` | `127.0.0.1` | HTTP bind address |
-| `CALENDAR_MCP_PORT` | `3456` | HTTP port |
+### Option A — Tailscale (recommended)
 
-`--host`, `--port`, and `--no-auth` may also be passed on the command line.
+[Tailscale](https://tailscale.com) gives every device a stable private IP in the `100.x.y.z`
+range and handles all the networking for you.
 
-## Security
+1. **Install Tailscale on the Mac and on the client machine**, and sign both into the same
+   account (“tailnet”).
 
-- **Read-only.** The tool only queries events — it never creates, edits, or deletes anything.
-- **Bearer token, fail-closed.** HTTP mode requires `CALENDAR_MCP_TOKEN` and refuses to start
-  without one. Tokens are compared in constant time. Passing `--no-auth` overrides this and
-  prints a loud warning — only do that on a trusted, isolated interface.
-- **macOS-only, gated by TCC.** Calendar access is granted per code identity by macOS. The
-  binary is code-signed with a stable identifier (`com.apple-calendar-mcp.cli`) so the grant
-  persists across upgrades.
-- **No transport encryption built in.** HTTP mode speaks plain HTTP. Run it only on a
-  private/trusted network (loopback, a VPN, or a tailnet) — never expose port 3456 to the
-  public internet.
+2. **Find the Mac's tailnet IP:**
 
-### Hardening (optional)
+   ```bash
+   tailscale ip -4        # e.g. 100.101.102.103
+   ```
 
-- **Tailscale ACLs.** If you serve over a tailnet, restrict who can reach the port in your
-  tailnet ACL policy — e.g. allow only your own devices to reach `*:3456`.
-- **WireGuard `AllowedIPs`.** On a plain WireGuard VPN, scope the peer's `AllowedIPs` to just
-  the host/port you need, and bind `CALENDAR_MCP_HOST` to the VPN interface address rather than
-  a wildcard.
+3. **Bind the server to it** and restart:
+
+   ```bash
+   launchctl setenv CALENDAR_MCP_HOST "$(tailscale ip -4)"
+   brew services restart apple-calendar
+   ```
+
+4. On the client, use `http://100.101.102.103:3456/mcp` in the config above.
+
+5. **(Optional) Lock it down with a tailnet ACL** so only *your* devices can reach the port. In
+   your Tailscale admin console policy file:
+
+   ```jsonc
+   {
+     "acls": [
+       // allow only your own devices to reach the calendar port on the Mac
+       { "action": "accept", "src": ["autogroup:member"], "dst": ["YOUR-MAC:3456"] }
+     ]
+   }
+   ```
+
+### Option B — WireGuard
+
+If you run your own [WireGuard](https://www.wireguard.com) network, the Mac has a WireGuard
+interface address (for example `10.0.0.1`).
+
+1. **Bind the server to the WireGuard interface address:**
+
+   ```bash
+   launchctl setenv CALENDAR_MCP_HOST "10.0.0.1"
+   brew services restart apple-calendar
+   ```
+
+2. On each peer that should reach it, **scope `AllowedIPs`** to just what's needed so only that
+   route is sent over the tunnel — e.g. in the peer's WireGuard config:
+
+   ```ini
+   [Peer]
+   # ...the Mac's public key + endpoint...
+   AllowedIPs = 10.0.0.1/32
+   ```
+
+3. From a peer, use `http://10.0.0.1:3456/mcp` in the config above.
+
+> Whichever VPN you use, the bearer token is still required — the VPN controls *who can reach the
+> port*, and the token controls *who can use the server*.
+
+---
+
+## Configuration reference
+
+| Setting | Env var | Default | Notes |
+|---|---|---|---|
+| Token | `CALENDAR_MCP_TOKEN` | — | **Required** for HTTP mode; compared in constant time |
+| Bind address | `CALENDAR_MCP_HOST` | `127.0.0.1` | set to your VPN IP to allow remote clients |
+| Port | `CALENDAR_MCP_PORT` | `3456` | |
+
+The same three can be passed on the command line: `--host`, `--port`, and `--no-auth`.
+
+---
+
+## Security model
+
+- **Read-only.** The tool only *queries* events. It can't create, change, or delete anything.
+- **Token required, fail-closed.** The HTTP server won't start without `CALENDAR_MCP_TOKEN`, and
+  rejects any request whose `Authorization: Bearer …` header doesn't match (constant-time compare).
+- **No built-in encryption.** HTTP mode is plain HTTP — only run it on a trusted private network
+  (loopback or a VPN), never on the public internet.
+- **macOS permission, pinned to the binary.** Calendar access is granted by macOS per code
+  identity. The binary is signed with a stable identifier (`com.apple-calendar-mcp.cli`) so the
+  grant survives upgrades — you approve it once.
+
+---
 
 ## Build from source
 
 ```bash
+git clone https://github.com/hunterbrewer04/apple-calendar-mcp.git
+cd apple-calendar-mcp
 swift build -c release
 codesign -s - --identifier com.apple-calendar-mcp.cli --force .build/release/apple-calendar
 ```
 
-The codesign step is required after **every** rebuild — the stable identity is what keeps the
-macOS Calendar permission valid across recompiles. (Homebrew runs this step for you.)
+Re-run the `codesign` step after **every** rebuild — the stable identity is what keeps the
+calendar permission valid across recompiles. (Homebrew does this for you automatically.)
 
-> A full Swift toolchain runs the test suite. A Command Line Tools-only install can `swift build`
-> and run the binary, but cannot `swift test` (no XCTest); CI runs the tests on a macOS runner.
+> A full Swift toolchain runs the test suite (`swift test`). The Command Line Tools alone can
+> build and run the binary but can't run the tests; they run in CI on every push.
 
-## Architecture
+---
+
+## How it works
 
 ```
-ical <subcommand>   → CLI ───────┐
-ical mcp            → stdio MCP ──┼─→ CalendarCore (EventKit) → macOS calendar DB (~100ms)
-ical mcp --http     → HTTP MCP ───┘    (bearer auth, fail-closed)
+ical <subcommand>   →  CLI ───────┐
+ical mcp            →  stdio MCP ──┼─→  shared EventKit reader  →  macOS calendar DB  (~100 ms)
+ical mcp --http     →  HTTP MCP ───┘     (read-only)
+                          ▲
+                          └─ bearer token, fail-closed
 ```
 
-A shared EventKit reader feeds both front-ends. The MCP layer uses the official
-[Swift MCP SDK](https://github.com/modelcontextprotocol/swift-sdk) for the protocol + stdio
-transport, and a [Hummingbird](https://github.com/hummingbird-project/hummingbird)-backed
-transport for token-gated Streamable HTTP.
+A single EventKit reader feeds both front-ends. The MCP layer uses the official
+[Swift MCP SDK](https://github.com/modelcontextprotocol/swift-sdk) for the protocol and the
+`stdio` transport, with a [Hummingbird](https://github.com/hummingbird-project/hummingbird)-backed
+transport for the token-gated HTTP server.
+
+---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE).
