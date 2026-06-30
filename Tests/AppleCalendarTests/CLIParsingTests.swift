@@ -36,4 +36,48 @@ final class CLIParsingTests: XCTestCase {
     func testCalendars() {
         XCTAssertEqual(CLI.parse(["calendars"]).command, .calendars)
     }
+
+    // MARK: - Write subcommands
+
+    func testAddParsesFlags() {
+        let (cmd, _) = CLI.parse(["add", "--title", "Lunch", "--start", "2026-07-01T12:00",
+                                  "--end", "2026-07-01T13:00", "--cal", "Personal"])
+        XCTAssertEqual(cmd, .write(WriteArgs(kind: .create, allDay: false, fields: [
+            "title": "Lunch", "start": "2026-07-01T12:00", "end": "2026-07-01T13:00", "cal": "Personal",
+        ])))
+    }
+
+    func testAddAllDayBoolean() {
+        let (cmd, _) = CLI.parse(["add", "--title", "Offsite", "--start", "2026-07-01", "--all-day"])
+        XCTAssertEqual(cmd, .write(WriteArgs(kind: .create, allDay: true, fields: [
+            "title": "Offsite", "start": "2026-07-01",
+        ])))
+    }
+
+    func testEditCarriesId() {
+        let (cmd, _) = CLI.parse(["edit", "evt-1", "--title", "New"])
+        XCTAssertEqual(cmd, .write(WriteArgs(kind: .update(id: "evt-1"), allDay: false, fields: ["title": "New"])))
+    }
+
+    func testEditWithoutIdIsUsage() {
+        XCTAssertEqual(CLI.parse(["edit", "--title", "New"]).command, .usage)
+    }
+
+    func testRmCarriesId() {
+        XCTAssertEqual(CLI.parse(["rm", "evt-1"]).command, .write(WriteArgs(kind: .delete(id: "evt-1"))))
+    }
+
+    func testRmWithoutIdIsUsage() {
+        XCTAssertEqual(CLI.parse(["rm"]).command, .usage)
+    }
+
+    func testLocationAliasNormalizes() {
+        let (cmd, _) = CLI.parse(["add", "--title", "X", "--start", "2026-07-01T09:00",
+                                  "--end", "2026-07-01T10:00", "--loc", "Cafe"])
+        if case .write(let w) = cmd {
+            XCTAssertEqual(w.fields["location"], "Cafe")
+        } else {
+            XCTFail("expected write command")
+        }
+    }
 }

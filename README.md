@@ -1,15 +1,16 @@
 # apple-calendar-mcp
 
-> A fast, **read-only** Apple Calendar tool for macOS. One small native binary is both an
-> `ical` terminal command **and** an MCP server — so any MCP-compatible app can read your
+> A fast, native Apple Calendar tool for macOS. One small binary is both an `ical` terminal
+> command **and** an MCP server — so any MCP-compatible app can read **and change** your
 > calendar, locally or from another machine on your private network.
 
-It reads the macOS calendar database directly through EventKit (~100 ms per query), so
+It works against the macOS calendar database directly through EventKit (~100 ms per query), so
 Calendar.app never has to be open and nothing leaves your machine.
 
 - 🗓️ **Instant queries** — today, this week, a specific calendar, the next N days.
+- ✏️ **Create, update, and delete events** — from the CLI or any MCP client.
 - 🔌 **Two ways to connect** — a local `stdio` server, or an HTTP server other machines can reach.
-- 🔐 **Safe by default** — read-only, and the network server refuses to start without a token.
+- 🔐 **Token-gated network access** — the HTTP server refuses to start without a token.
 - 🍺 **One-command install** — Homebrew builds, code-signs, and (optionally) runs it for you.
 
 ---
@@ -81,7 +82,32 @@ $ ical today
 | `ical detail week` | any period, with notes + URLs |
 | `ical debug today` | raw, pipe-delimited output (for scripts) |
 
-Add **`-x`** (or `--detail`) to any command to include event notes and URLs.
+Add **`-x`** (or `--detail`) to any command to include event notes and URLs (and the event **id**,
+which `edit`/`rm` need).
+
+### Creating and changing events
+
+```bash
+# add a timed event
+ical add --title "Standup" --start 2026-07-01T09:00 --end 2026-07-01T09:15 --cal "Work"
+
+# add an all-day event
+ical add --title "Offsite" --start 2026-07-01 --all-day --cal "Work"
+
+# find an event's id, then edit or remove it
+ical detail today            # note the 🆔 line
+ical edit <id> --title "Standup (moved)" --start 2026-07-01T09:30 --end 2026-07-01T09:45
+ical rm <id>
+```
+
+| Command | Does |
+|---|---|
+| `ical add --title T --start ISO [--end ISO] [--all-day] [--cal NAME] [--location L] [--notes N] [--url U]` | create an event |
+| `ical edit ID [--title …] [--start …] [--end …] [--all-day] [--cal …] [--location …] [--notes …] [--url …]` | change the given fields of an event |
+| `ical rm ID` | delete an event |
+
+Dates are ISO-8601 (`2026-07-01T14:30`); for `--all-day` events pass a plain date (`2026-07-01`).
+`edit` changes only the fields you pass and leaves the rest untouched.
 
 > Recurring events are expanded to individual occurrences, and a multi-day event that started
 > earlier still shows up (with its original start date) for as long as it overlaps the window.
@@ -147,16 +173,21 @@ Manage it with `brew services list`, `brew services restart apple-calendar`, and
 
 ### Available tools
 
-| Tool | What it returns |
+| Tool | What it does |
 |---|---|
 | `list_calendars` | the names of all calendars |
 | `get_today` / `get_tomorrow` | a single day |
 | `get_week` / `get_month` | the next 7 / 30 days |
 | `get_next_days(days)` | the next *N* days |
 | `get_calendar_events(calendar_name, days)` | one calendar by name |
+| `create_event(title, start, end, …)` | create a new event |
+| `update_event(event_id, …)` | change fields of an existing event |
+| `delete_event(event_id)` | delete an event |
 
-Every tool also accepts `details: true` to include notes and URLs. Output is the same readable
-text the CLI prints.
+The read tools accept `details: true` to include notes, URLs, and each event's **id**. The write
+tools take ISO-8601 dates (`2026-07-01T14:30`; a plain date like `2026-07-01` for `all_day` events);
+`update_event`/`delete_event` reference an event by the `id` returned in a `details: true` listing.
+`create_event` and `update_event` also accept `calendar_name`, `location`, `notes`, and `url`.
 
 ---
 
@@ -221,8 +252,8 @@ curl -s -X POST http://YOUR-MAC-IP:3456/mcp \
 
 ## Running it securely over a VPN
 
-The HTTP server speaks **plain HTTP with no transport encryption**, and it grants read access to
-your whole calendar. **Do not expose port 3456 to the public internet.** Instead, put both
+The HTTP server speaks **plain HTTP with no transport encryption**, and it grants read **and write**
+access to your whole calendar. **Do not expose port 3456 to the public internet.** Instead, put both
 machines on a private VPN and bind the server to the VPN interface. Two good options:
 
 ### Option A — Tailscale (recommended)
@@ -302,9 +333,13 @@ The same three can be passed on the command line: `--host`, `--port`, and `--no-
 
 ## Security model
 
-- **Read-only.** The tool only *queries* events. It can't create, change, or delete anything.
+- **Read *and* write.** The tool can query events and also create, update, and delete them. There
+  is no read-only mode — anyone who can call the server can change your calendar, so treat access
+  to it (and its token) accordingly.
 - **Token required, fail-closed.** The HTTP server won't start without `CALENDAR_MCP_TOKEN`, and
   rejects any request whose `Authorization: Bearer …` header doesn't match (constant-time compare).
+  Because the HTTP server also exposes the write tools, keeping the token secret matters more than
+  ever.
 - **No built-in encryption.** HTTP mode is plain HTTP — only run it on a trusted private network
   (loopback or a VPN), never on the public internet.
 - **macOS permission, pinned to the binary.** Calendar access is granted by macOS per code
@@ -334,13 +369,13 @@ calendar permission valid across recompiles. (Homebrew does this for you automat
 
 ```
 ical <subcommand>   →  CLI ───────┐
-ical mcp            →  stdio MCP ──┼─→  shared EventKit reader  →  macOS calendar DB  (~100 ms)
-ical mcp --http     →  HTTP MCP ───┘     (read-only)
+ical mcp            →  stdio MCP ──┼─→  shared EventKit store  →  macOS calendar DB  (~100 ms)
+ical mcp --http     →  HTTP MCP ───┘      (read + write)
                           ▲
                           └─ bearer token, fail-closed
 ```
 
-A single EventKit reader feeds both front-ends. The MCP layer uses the official
+A single EventKit store feeds both front-ends. The MCP layer uses the official
 [Swift MCP SDK](https://github.com/modelcontextprotocol/swift-sdk) for the protocol and the
 `stdio` transport, with a [Hummingbird](https://github.com/hummingbird-project/hummingbird)-backed
 transport for the token-gated HTTP server.
