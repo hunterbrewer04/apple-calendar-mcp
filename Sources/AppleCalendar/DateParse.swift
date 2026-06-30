@@ -25,6 +25,7 @@ enum DateParse {
     private static func parse(_ s: String, pattern: String) -> Date? {
         let f = DateFormatter()
         f.locale = posix
+        f.isLenient = false   // reject out-of-range components (e.g. month 13) instead of rolling over
         f.dateFormat = pattern
         return f.date(from: s)
     }

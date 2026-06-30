@@ -137,6 +137,9 @@ enum CLI {
                 try store.ensureAccess()
                 switch w.kind {
                 case .create:
+                    if !w.allDay, (w.fields["end"]?.isEmpty ?? true) {
+                        throw StoreError.invalidInput("--end is required for a timed event (or pass --all-day).")
+                    }
                     let event = try store.createEvent(Self.draft(from: w))
                     return (Renderer.confirmation(verb: "Created", event: event), nil, 0)
                 case .update(let id):

@@ -49,4 +49,11 @@ final class DateParseTests: XCTestCase {
         XCTAssertThrowsError(try DateParse.dateTime("next tuesday"))
         XCTAssertThrowsError(try DateParse.dateOnly("07/01/2026"))
     }
+
+    func testOutOfRangeComponentsRejected() {
+        // isLenient=false: invalid month/day must be rejected, not rolled over.
+        XCTAssertThrowsError(try DateParse.dateOnly("2026-13-01"))
+        XCTAssertThrowsError(try DateParse.dateTime("2026-13-01T10:00"))
+        XCTAssertThrowsError(try DateParse.dateOnly("2026-02-30"))
+    }
 }

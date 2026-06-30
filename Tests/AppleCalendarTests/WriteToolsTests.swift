@@ -194,4 +194,18 @@ final class WriteToolsTests: XCTestCase {
         XCTAssertEqual(r.exitCode, 1)
         XCTAssertNotNil(r.stderr)
     }
+
+    func testCLIAddTimedWithoutEndIsError() {
+        let mock = MockCalendarStore()
+        let r = CLI.run(["add", "--title", "X", "--start", "2026-07-01T09:00"], store: mock)
+        XCTAssertEqual(r.exitCode, 1)
+        XCTAssertNil(mock.lastCreate)   // rejected before reaching the store
+    }
+
+    func testCLIAddAllDayWithoutEndSucceeds() {
+        let mock = MockCalendarStore()
+        let r = CLI.run(["add", "--title", "Offsite", "--start", "2026-07-01", "--all-day"], store: mock)
+        XCTAssertEqual(r.exitCode, 0, r.stderr ?? "")
+        XCTAssertEqual(mock.lastCreate?.isAllDay, true)
+    }
 }

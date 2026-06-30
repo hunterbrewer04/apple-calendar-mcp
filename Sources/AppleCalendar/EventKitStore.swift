@@ -31,14 +31,22 @@ final class EventKitStore: CalendarStore {
 
     // MARK: - Helpers
 
-    /// Resolve an `EKCalendar` by exact title, throwing `.calendarNotFound` if
-    /// no match. Shared by reads and writes.
-    private func calendar(named name: String) throws -> EKCalendar {
+    /// Resolve every `EKCalendar` with the given exact title, throwing
+    /// `.calendarNotFound` if none match. Reads query all of them (a user can
+    /// have several calendars sharing a title, e.g. a local and a subscribed one).
+    private func calendars(named name: String) throws -> [EKCalendar] {
         let all = store.calendars(for: .event)
-        guard let match = all.first(where: { $0.title == name }) else {
+        let matches = all.filter { $0.title == name }
+        guard !matches.isEmpty else {
             throw StoreError.calendarNotFound(name: name, available: all.map(\.title).sorted())
         }
-        return match
+        return matches
+    }
+
+    /// Resolve a single target calendar for a write. If several share a title
+    /// there is no way to disambiguate, so the first is used.
+    private func calendar(named name: String) throws -> EKCalendar {
+        try calendars(named: name)[0]
     }
 
     private func map(_ ev: EKEvent) -> CalEvent {
@@ -56,7 +64,7 @@ final class EventKitStore: CalendarStore {
         }
         var matchingCalendars: [EKCalendar]? = nil  // nil = all calendars
         if let name = calendarName {
-            matchingCalendars = [try calendar(named: name)]
+            matchingCalendars = try calendars(named: name)
         }
         let predicate = store.predicateForEvents(withStart: range.start, end: range.end, calendars: matchingCalendars)
         let mapped = store.events(matching: predicate).map(map)
