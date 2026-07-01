@@ -8,6 +8,12 @@ func emit(_ result: (stdout: String?, stderr: String?, exitCode: Int32)) -> Neve
 
 let argv = Array(CommandLine.arguments.dropFirst())
 
+// `ical serve ...` — lifecycle management for the networked HTTP server
+// (setup/status/uninstall/token via a user-owned LaunchAgent + token file).
+if argv.first == "serve" {
+    emit(Serve.run(Array(argv.dropFirst())))
+}
+
 // `ical mcp ...` — stdio MCP server (Phase 2) or HTTP (Phase 3 stub).
 if argv.first == "mcp" {
     let mcpArgs = Array(argv.dropFirst())
