@@ -25,7 +25,10 @@ let package = Package(
         ),
         .testTarget(
             name: "AppleCalendarTests",
-            dependencies: ["apple-calendar"],
+            dependencies: [
+                "apple-calendar",
+                .product(name: "MCP", package: "swift-sdk"),
+            ],
             path: "Tests/AppleCalendarTests"
         ),
     ]

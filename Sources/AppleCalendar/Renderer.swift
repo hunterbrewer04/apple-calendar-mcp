@@ -39,9 +39,19 @@ enum Renderer {
                 }
             }
             if details, let url = e.url { meta.append("   🔗 \(url.absoluteString)") }
+            if details, let id = e.id { meta.append("   🆔 \(id)") }
             for m in meta { lines.append("  \(pad("", 6))  \(pad("", 16))  \(m)") }
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// One-line confirmation of a write, e.g.
+    /// `Created "Standup" — Jun 3, 9:00 AM – 9:15 AM on Work (id: ABC123)`.
+    static func confirmation(verb: String, event e: CalEvent) -> String {
+        let date = fmt(e.startDate, "MMM d")
+        let time = e.isAllDay ? "all day" : "\(fmt(e.startDate, "h:mm a")) – \(fmt(e.endDate, "h:mm a"))"
+        let idPart = e.id.map { " (id: \($0))" } ?? ""
+        return "\(verb) \"\(oneLine(e.title))\" — \(date), \(time) on \(e.calendar)\(idPart)"
     }
 
     static func raw(_ events: [CalEvent]) -> String {
@@ -51,7 +61,7 @@ enum Renderer {
             let ts = e.isAllDay ? "" : fmt(e.startDate, "h:mm:ss a")
             let te = e.isAllDay ? "" : fmt(e.endDate, "h:mm:ss a")
             let desc = clean(e.notes).replacingOccurrences(of: "\n", with: "¶")
-            return "\(e.calendar)|\(ds)|\(ts)|\(te)|\(clean(e.title))|\(clean(e.location))|\(desc)|\(clean(e.url?.absoluteString))"
+            return "\(e.calendar)|\(ds)|\(ts)|\(te)|\(clean(e.title))|\(clean(e.location))|\(desc)|\(clean(e.url?.absoluteString))|\(e.id ?? "")"
         }.joined(separator: "\n")
     }
 

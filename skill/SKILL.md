@@ -5,10 +5,10 @@ description: >
   phrasings like "what's on my calendar", "pull from iCal", "do I have anything today/tomorrow",
   "check my schedule", "what meetings do I have", "what's this week look like", "any events
   coming up", "show me my calendar", or any request to look up, summarize, or reason about
-  calendar events. Uses the `ical` CLI — a compiled Swift binary that reads the calendar
-  database directly via Apple's EventKit framework (queries return in ~100ms; Calendar.app
-  does not need to be running). Do NOT use for creating, editing, or deleting calendar events
-  (the ical CLI is read-only).
+  calendar events, or to add, change, or remove them ("put X on my calendar", "schedule …",
+  "move my 3pm", "cancel …", "delete that event"). Uses the `ical` CLI — a compiled Swift binary
+  that reads and writes the calendar database directly via Apple's EventKit framework (queries
+  return in ~100ms; Calendar.app does not need to be running).
 ---
 
 > **LOCAL USE ONLY** — this skill shells out to the on-Mac `ical` binary. Claude sessions on
@@ -45,10 +45,23 @@ to run several (e.g., `today` then `week`) to answer a question well.
 | This month | `ical month` |
 | A specific calendar | `ical cal "Calendar Name" [days]` |
 | Which calendars exist | `ical calendars` |
-| Notes, descriptions, URLs | Add `-x` to any command, or use `ical detail [period]` |
+| Notes, descriptions, URLs, **event ids** | Add `-x` to any command, or use `ical detail [period]` |
+| Add an event | `ical add --title T --start ISO [--end ISO] [--all-day] [--cal NAME] [--location L] [--notes N] [--url U]` |
+| Change an event | `ical edit ID [--title …] [--start …] [--end …] [--all-day] [--cal …] [--location …] [--notes …] [--url …]` |
+| Delete an event | `ical rm ID` |
 
 When the user's timeframe is ambiguous, default to `today`. If they say "coming up" or
 "upcoming" without a specific window, use `week`.
+
+### Writing events (add / edit / delete)
+
+- Dates are ISO-8601: `2026-07-01T14:30` for timed events, or a plain date `2026-07-01` with
+  `--all-day`. The CLI rejects an end that is before the start.
+- `edit` and `rm` need the event's **id**. Get it by first running a detailed listing
+  (`ical detail today` or add `-x`) and reading the `🆔` line; never guess an id.
+- `edit` changes only the fields you pass. To move a meeting, pass new `--start`/`--end`.
+- Writes change the user's real calendar. Before deleting or rescheduling, confirm you have the
+  right event (title, time, calendar), and prefer to echo back what you changed.
 
 ### 2. Run the command
 

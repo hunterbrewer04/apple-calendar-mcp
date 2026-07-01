@@ -22,7 +22,7 @@ if argv.first == "mcp" {
             exit(1)
         }
         if config.allowNoAuth {
-            FileHandle.standardError.write("⚠️  Running with --no-auth: anyone who can reach \(config.host):\(config.port) can read your calendar.\n".data(using: .utf8)!)
+            FileHandle.standardError.write("⚠️  Running with --no-auth: anyone who can reach \(config.host):\(config.port) can read and modify your calendar.\n".data(using: .utf8)!)
         }
         Task {
             do { try await HTTPRunner.run(store: EventKitStore(), config: config) } catch {
