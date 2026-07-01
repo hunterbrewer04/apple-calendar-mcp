@@ -1,7 +1,10 @@
 import EventKit
 import Foundation
 
-final class EventKitStore: CalendarStore {
+// EKEventStore is a reference type without a Sendable guarantee, but each call
+// creates and mutates its own EKEvent objects (never shared across threads), so
+// concurrent use from the per-session MCP servers is safe in practice.
+final class EventKitStore: CalendarStore, @unchecked Sendable {
     private let store = EKEventStore()
 
     func ensureAccess() throws {
@@ -137,8 +140,8 @@ final class EventKitStore: CalendarStore {
             // start so a freshly built EKEvent always has both endpoints set.
             ev.endDate = start
         }
-        if ev.endDate < ev.startDate {
-            throw StoreError.invalidInput("Event end (\(ev.endDate)) is before its start (\(ev.startDate)).")
+        if let end = ev.endDate, let start = ev.startDate, end < start {
+            throw StoreError.invalidInput("Event end (\(end)) is before its start (\(start)).")
         }
         if let location = draft.location { ev.location = location }
         if let notes = draft.notes { ev.notes = notes }

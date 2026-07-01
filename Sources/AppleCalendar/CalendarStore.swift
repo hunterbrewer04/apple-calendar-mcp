@@ -11,7 +11,7 @@ enum StoreError: Error, Equatable {
     case writeFailed(String)
 }
 
-protocol CalendarStore {
+protocol CalendarStore: Sendable {
     func ensureAccess() throws
     func calendars() -> [String]
     func events(offsetDays: Int, days: Int, calendarName: String?) throws -> [CalEvent]

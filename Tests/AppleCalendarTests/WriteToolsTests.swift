@@ -4,7 +4,7 @@ import MCP
 
 /// An in-memory CalendarStore for exercising the write tools without EventKit.
 /// Records the last draft/id it was handed and lets a test script its result.
-final class MockCalendarStore: CalendarStore {
+final class MockCalendarStore: CalendarStore, @unchecked Sendable {
     var accessGranted = true
     var calendarNames = ["Work", "Personal"]
     var existingIds = Set(["evt-1"])
