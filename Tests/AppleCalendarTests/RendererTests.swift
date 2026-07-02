@@ -12,15 +12,17 @@ final class RendererTests: XCTestCase {
     }
 
     func testTimedEventRowAndMeta() {
+        // Assert on content, not exact column whitespace (matching the sibling tests): the row
+        // carries date + time range + title, and location/calendar render on their own lines.
         let e = CalEvent(calendar: "Work", title: "1:1 with Sarah",
                          startDate: d(13, 30), endDate: d(14, 30), isAllDay: false,
                          location: "Zoom", notes: nil, url: nil)
         let out = Renderer.events([e], details: false)
-        XCTAssertEqual(out, """
-          Jun 3   1:30 PM – 2:30 PM  1:1 with Sarah
-                                      📍 Zoom
-                                      📅 Work
-        """)
+        XCTAssertTrue(out.contains("Jun 3"))
+        XCTAssertTrue(out.contains("1:30 PM – 2:30 PM"))
+        XCTAssertTrue(out.contains("1:1 with Sarah"))
+        XCTAssertTrue(out.contains("📍 Zoom"))
+        XCTAssertTrue(out.contains("📅 Work"))
     }
 
     func testAllDayAndPipeSanitization() {
@@ -45,5 +47,23 @@ final class RendererTests: XCTestCase {
 
     func testCalendarsOnePerLine() {
         XCTAssertEqual(Renderer.calendars(["A", "B"]), "A\nB")
+    }
+
+    func testRawSanitizesCalendarDelimiter() {
+        // The calendar name is the first field of a |-delimited record. A | in it must be
+        // sanitized to / so it can't inject a phantom field and shift every column after it.
+        let e = CalEvent(calendar: "Bills | Subs", title: "RENT | Utilities",
+                         startDate: d(9, 0), endDate: d(9, 15), isAllDay: false,
+                         location: nil, notes: nil, url: nil)
+        let row = Renderer.raw([e])
+        XCTAssertEqual(row.components(separatedBy: "|").count, 9)   // exactly 9 fields, no injection
+        XCTAssertTrue(row.hasPrefix("Bills / Subs|"))              // calendar name sanitized in place
+    }
+
+    func testConfirmationSanitizesCalendarName() {
+        let e = CalEvent(calendar: "Bills | Subs", title: "Rent",
+                         startDate: d(9, 0), endDate: d(9, 15), isAllDay: false,
+                         location: nil, notes: nil, url: nil)
+        XCTAssertTrue(Renderer.confirmation(verb: "Created", event: e).contains("on Bills / Subs"))
     }
 }

@@ -18,8 +18,13 @@ final class DateWindowTests: XCTestCase {
     }
 
     func testNonPositiveDaysRejected() {
-        XCTAssertEqual(DateWindow.range(offsetDays: 0, days: 0, now: now, calendar: cal),
-                       .failure(.nonPositiveDays(0)))
+        // Can't XCTAssertEqual the whole Result: its success type is a tuple
+        // (start:Date, end:Date), and tuples aren't Equatable. Match the failure instead.
+        let r = DateWindow.range(offsetDays: 0, days: 0, now: now, calendar: cal)
+        guard case .failure(.nonPositiveDays(let d)) = r else {
+            return XCTFail("expected .nonPositiveDays failure, got \(r)")
+        }
+        XCTAssertEqual(d, 0)
     }
 
     func testDaysClampedToMax() {

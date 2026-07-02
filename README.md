@@ -15,14 +15,25 @@ Calendar.app never has to be open and nothing leaves your machine.
 
 ---
 
+## Which mode do you need?
+
+- **Same Mac** (the AI app runs where your calendar lives) → **Local (`stdio`)**. One JSON
+  block, no token, no network. Jump to [Local setup](#mode-1--local-stdio).
+- **Another machine** (laptop, server, phone, a remote Claude Code) → **Networked (HTTP)**.
+  One command sets it up: `ical serve setup`. Jump to [Networked setup](#mode-2--networked-http).
+
+---
+
 ## Contents
 
+- [Which mode do you need?](#which-mode-do-you-need)
 - [Requirements](#requirements)
 - [Install](#install)
 - [Using the `ical` command](#using-the-ical-command)
 - [Using the MCP server](#using-the-mcp-server)
 - [Connecting from another machine](#connecting-from-another-machine)
 - [Running it securely over a VPN](#running-it-securely-over-a-vpn)
+- [Manual / advanced setup](#manual--advanced-setup)
 - [Configuration reference](#configuration-reference)
 - [Security model](#security-model)
 - [Build from source](#build-from-source)
@@ -134,44 +145,37 @@ standard input/output — no network, no token. Add this to your MCP client's co
 
 ### Mode 2 — Networked (HTTP)
 
-Best when the app runs on a **different machine** (see
-[Connecting from another machine](#connecting-from-another-machine)). The binary runs as a small
-HTTP server; clients authenticate with a bearer **token**.
-
-Start it by hand to try it out:
+For an app on another machine on your private network (see the
+[VPN section](#running-it-securely-over-a-vpn) — never the open internet). One command does
+everything:
 
 ```bash
-export CALENDAR_MCP_TOKEN="$(openssl rand -hex 16)"   # generate a token
-ical mcp --http                                       # listens on 127.0.0.1:3456
+brew install hunterbrewer04/tap/apple-calendar
+ical serve setup --tailscale      # or: --host <your-private-ip>   (bare = loopback only)
 ```
 
-> The HTTP server is **fail-closed**: with no token set it refuses to start. (You can pass
+`serve setup` generates a token (saved to `~/.config/apple-calendar/token`, chmod 600),
+installs a background LaunchAgent bound to your chosen address, starts it, and prints the exact
+client config to paste on the other machine. It **survives reboots and `brew upgrade`** — no
+`launchctl setenv`, nothing to redo.
+
+Manage it any time:
+
+| Command | Does |
+|---|---|
+| `ical serve status` | is it up? (expects `401` = up + auth enforced) + re-prints client config |
+| `ical serve token` | print the token (`ical serve token \| pbcopy`) |
+| `ical serve uninstall` | stop and remove the background server (`--purge` also deletes the token) |
+
+> The HTTP server is **fail-closed**: with no token resolvable it refuses to start. (You can pass
 > `--no-auth` to override that, but only on a fully trusted, isolated interface.)
 
-### Run it in the background
-
-To keep the HTTP server running and restart it at login, use Homebrew's service manager. Because
-the server needs the token in its environment, set it first with `launchctl setenv`:
-
-```bash
-# 1. generate a token and make it visible to background services
-launchctl setenv CALENDAR_MCP_TOKEN "$(openssl rand -hex 16)"
-
-# 2. start the service
-brew services start apple-calendar
-```
-
-Check it's up (a request **without** the token should be rejected with `401`):
-
-```bash
-curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:3456/mcp \
-  -H 'Accept: application/json, text/event-stream' -d '{}'      # → 401
-```
-
-Manage it with `brew services list`, `brew services restart apple-calendar`, and
-`brew services stop apple-calendar`. Logs go to `$(brew --prefix)/var/log/apple-calendar.log`.
+Logs go to `~/Library/Logs/apple-calendar.log`.
 
 ### Available tools
+
+> The HTTP server handles **multiple concurrent clients and reconnects** — each MCP session is
+> isolated — so several apps (and repeated connect/disconnect cycles) can point at it at once.
 
 | Tool | What it does |
 |---|---|
@@ -200,21 +204,15 @@ There are two sides to set up.
 
 ### On the Mac (the server)
 
-1. **Generate a token** and make it available to the background service:
+Run one command — it generates the token, binds to your chosen private-network address, and
+starts the background server (see [Mode 2](#mode-2--networked-http)):
 
-   ```bash
-   TOKEN="$(openssl rand -hex 16)"
-   echo "$TOKEN"                                   # copy this — you'll need it on the other machine
-   launchctl setenv CALENDAR_MCP_TOKEN "$TOKEN"
-   ```
+```bash
+ical serve setup --tailscale      # or --host <your-private-ip>   (with a VPN this is your VPN IP)
+```
 
-2. **Bind the server to your private-network address** instead of `127.0.0.1`, so other machines
-   can reach it. (With a VPN this is your VPN IP — see below.)
-
-   ```bash
-   launchctl setenv CALENDAR_MCP_HOST "100.x.y.z"   # your Mac's private/VPN address
-   brew services restart apple-calendar
-   ```
+It prints the token and the ready-to-paste client config. Grab the token again any time with
+`ical serve token`.
 
 ### On the other machine (the client)
 
@@ -270,11 +268,10 @@ range and handles all the networking for you.
    tailscale ip -4        # e.g. 100.101.102.103
    ```
 
-3. **Bind the server to it** and restart:
+3. **Bind the server to it:**
 
    ```bash
-   launchctl setenv CALENDAR_MCP_HOST "$(tailscale ip -4)"
-   brew services restart apple-calendar
+   ical serve setup --tailscale      # reads `tailscale ip -4` for you
    ```
 
 4. On the client, use `http://100.101.102.103:3456/mcp` in the config above.
@@ -299,8 +296,7 @@ interface address (for example `10.0.0.1`).
 1. **Bind the server to the WireGuard interface address:**
 
    ```bash
-   launchctl setenv CALENDAR_MCP_HOST "10.0.0.1"
-   brew services restart apple-calendar
+   ical serve setup --host 10.0.0.1
    ```
 
 2. On each peer that should reach it, **scope `AllowedIPs`** to just what's needed so only that
@@ -319,13 +315,56 @@ interface address (for example `10.0.0.1`).
 
 ---
 
+## Manual / advanced setup
+
+`ical serve setup` automates all of this. Here's what it does by hand, if you want to run the
+server some other way.
+
+<details>
+<summary>Run the HTTP server manually (env token + Homebrew service)</summary>
+
+Start it by hand to try it out:
+
+```bash
+export CALENDAR_MCP_TOKEN="$(openssl rand -hex 16)"   # generate a token
+ical mcp --http                                       # listens on 127.0.0.1:3456
+```
+
+To keep it running across logins with Homebrew's service manager, put the token in the service
+environment first:
+
+```bash
+launchctl setenv CALENDAR_MCP_TOKEN "$(openssl rand -hex 16)"
+launchctl setenv CALENDAR_MCP_HOST "100.x.y.z"        # optional: bind to a private/VPN address
+brew services start apple-calendar
+```
+
+Check it's up (a request **without** the token should be rejected with `401`):
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:3456/mcp \
+  -H 'Accept: application/json, text/event-stream' -d '{}'      # → 401
+```
+
+> ⚠️ `brew services` and `brew upgrade` **regenerate the service plist**, which wipes the
+> `launchctl setenv` token and host out of its environment — after the next upgrade the
+> fail-closed server won't come back up. That's exactly why `ical serve setup` uses a token
+> *file* plus a user-owned LaunchAgent instead; it's the supported path.
+
+</details>
+
+---
+
 ## Configuration reference
 
 | Setting | Env var | Default | Notes |
 |---|---|---|---|
-| Token | `CALENDAR_MCP_TOKEN` | — | **Required** for HTTP mode; compared in constant time |
+| Token | `CALENDAR_MCP_TOKEN` | — | HTTP mode needs a token from **some** source — this env var **or** the token file below; compared in constant time |
+| Token file | `CALENDAR_MCP_TOKEN_FILE` | `~/.config/apple-calendar/token` | Read when `CALENDAR_MCP_TOKEN` is unset; `serve setup` writes it |
 | Bind address | `CALENDAR_MCP_HOST` | `127.0.0.1` | set to your VPN IP to allow remote clients |
 | Port | `CALENDAR_MCP_PORT` | `3456` | |
+
+Token precedence: `CALENDAR_MCP_TOKEN` env → `CALENDAR_MCP_TOKEN_FILE` → default file.
 
 The same three can be passed on the command line: `--host`, `--port`, and `--no-auth`.
 

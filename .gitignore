@@ -8,6 +8,9 @@ ical
 # Local-only working docs — only README.md ships in the public repo.
 *.md
 !README.md
+# Local-only design + implementation plan (kept out of the public repo explicitly):
+NETWORKED-SETUP-DESIGN.md
+NETWORKED-SETUP-PLAN.md
 # ...but product docs that ship with the repo stay tracked:
 !skill/**/*.md
 !examples/**/*.md
