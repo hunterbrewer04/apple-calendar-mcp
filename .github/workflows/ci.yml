@@ -4,7 +4,9 @@ on: [push, pull_request]
 
 jobs:
   build-test:
-    runs-on: macos-14
+    # Needs Swift 6.2+: a pinned dependency (swift-sdk) uses the of:-less
+    # withThrowingTaskGroup form. macos-15 ships the newer Xcode/Swift toolchain.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       # Package.swift needs swift-tools-version 6.0, but the runner's default Xcode is
