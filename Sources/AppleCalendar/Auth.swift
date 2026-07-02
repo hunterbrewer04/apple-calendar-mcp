@@ -19,20 +19,35 @@ struct ServerConfig {
             guard let idx = argv.firstIndex(of: flag), argv.index(after: idx) < argv.endIndex else { return nil }
             return argv[argv.index(after: idx)]
         }
-        // Trim then treat empty/whitespace as absent, so a fat-fingered "" or " "
-        // from any source fails closed instead of being accepted as a credential.
-        func nonEmpty(_ s: String?) -> String? {
+        // Trim + empty→nil. Used for file sources (a token file naturally carries a
+        // trailing newline) and for the *_FILE path env var.
+        func trimmedNonEmpty(_ s: String?) -> String? {
             guard let t = s?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
             return t
         }
-        // Precedence: explicit env token → CALENDAR_MCP_TOKEN_FILE → default file.
-        let tokenFilePath = env["CALENDAR_MCP_TOKEN_FILE"] ?? "\(homeDir)/.config/apple-calendar/token"
-        let token = nonEmpty(env["CALENDAR_MCP_TOKEN"]) ?? nonEmpty(readFile(tokenFilePath))
+        // The env token keeps its exact legacy behavior: used VERBATIM (not trimmed), but a
+        // whitespace-only value counts as absent so it still fails closed. Trimming it would
+        // silently change the credential for a deployment whose token has surrounding
+        // whitespace, locking out already-configured clients on upgrade.
+        func envTokenNonEmpty(_ s: String?) -> String? {
+            guard let s, !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return s
+        }
+        let allowNoAuth = argv.contains("--no-auth")
+        // Precedence: explicit env token → CALENDAR_MCP_TOKEN_FILE → default file. An empty
+        // CALENDAR_MCP_TOKEN_FILE (e.g. an unset shell var) falls back to the default path
+        // rather than suppressing it. Under `--no-auth` the file is NOT consulted, so a
+        // leftover `serve setup` token can't silently re-enable auth and contradict the
+        // "running without auth" warning — `--no-auth` yields a genuinely open server.
+        let tokenFilePath = trimmedNonEmpty(env["CALENDAR_MCP_TOKEN_FILE"]) ?? "\(homeDir)/.config/apple-calendar/token"
+        let token = allowNoAuth
+            ? envTokenNonEmpty(env["CALENDAR_MCP_TOKEN"])
+            : (envTokenNonEmpty(env["CALENDAR_MCP_TOKEN"]) ?? trimmedNonEmpty(readFile(tokenFilePath)))
         return ServerConfig(
             host: argValue("--host") ?? env["CALENDAR_MCP_HOST"] ?? "127.0.0.1",
             port: argValue("--port").flatMap(Int.init) ?? Int(env["CALENDAR_MCP_PORT"] ?? "") ?? 3456,
             token: token,
-            allowNoAuth: argv.contains("--no-auth"))
+            allowNoAuth: allowNoAuth)
     }
 
     /// Default token-file reader: returns file contents, or nil if unreadable/missing.

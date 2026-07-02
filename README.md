@@ -359,7 +359,7 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:3456/mcp \
 
 | Setting | Env var | Default | Notes |
 |---|---|---|---|
-| Token | `CALENDAR_MCP_TOKEN` | — | **Required** for HTTP mode; compared in constant time |
+| Token | `CALENDAR_MCP_TOKEN` | — | HTTP mode needs a token from **some** source — this env var **or** the token file below; compared in constant time |
 | Token file | `CALENDAR_MCP_TOKEN_FILE` | `~/.config/apple-calendar/token` | Read when `CALENDAR_MCP_TOKEN` is unset; `serve setup` writes it |
 | Bind address | `CALENDAR_MCP_HOST` | `127.0.0.1` | set to your VPN IP to allow remote clients |
 | Port | `CALENDAR_MCP_PORT` | `3456` | |

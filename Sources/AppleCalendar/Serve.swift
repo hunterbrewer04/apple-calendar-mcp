@@ -3,7 +3,13 @@ import Foundation
 enum Serve {
     static let label = "com.apple-calendar-mcp"
     static let defaultPort = 3456
-    static let optBinaryPath = "/opt/homebrew/opt/apple-calendar/bin/ical"
+    // Homebrew's stable `opt` symlink for the installed binary, checked for both
+    // Apple-Silicon (/opt/homebrew) and Intel (/usr/local) prefixes so the LaunchAgent
+    // points at a path that survives `brew upgrade` on either architecture.
+    static let optBinaryPaths = [
+        "/opt/homebrew/opt/apple-calendar/bin/ical",   // Apple Silicon Homebrew
+        "/usr/local/opt/apple-calendar/bin/ical",      // Intel Homebrew
+    ]
 
     // MARK: - Paths
     static func configDir(home: String) -> String { "\(home)/.config/apple-calendar" }
@@ -75,15 +81,15 @@ enum Serve {
         if let h = explicitHost { return .success(h) }
         if useLocal { return .success("127.0.0.1") }
         if useTailscale {
-            guard let ip = tailscaleIP(), !ip.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            else { return .failure(.tailscaleUnavailable) }
-            return .success(ip.trimmingCharacters(in: .whitespacesAndNewlines))
+            let ip = tailscaleIP()?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let ip, !ip.isEmpty else { return .failure(.tailscaleUnavailable) }
+            return .success(ip)
         }
         return .success("127.0.0.1")   // secure-by-default
     }
 
     static func resolveBinaryPath(argv0: String, fileExists: (String) -> Bool) -> (path: String, warning: String?) {
-        if fileExists(optBinaryPath) { return (optBinaryPath, nil) }
+        if let opt = optBinaryPaths.first(where: fileExists) { return (opt, nil) }
         if argv0.contains("/.build/") {
             return (argv0, "warning: pointing the service at a source build (\(argv0)); "
                          + "install via Homebrew so upgrades don't dangle this path.")
@@ -110,9 +116,21 @@ extension Serve {
         let outPipe = Pipe(); let errPipe = Pipe()
         p.standardOutput = outPipe; p.standardError = errPipe
         do { try p.run() } catch { return (127, "", "\(error)") }
+        // Drain stderr on a background thread while reading stdout on this one, so a child
+        // that writes more than the OS pipe buffer to either stream can't block on write
+        // while we block in waitUntilExit() (the classic Foundation.Process deadlock).
+        final class DataBox: @unchecked Sendable { var data = Data() }
+        let errBox = DataBox()
+        let errDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            errBox.data = errPipe.fileHandleForReading.readDataToEndOfFile()
+            errDone.signal()
+        }
+        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+        errDone.wait()
         p.waitUntilExit()
-        let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let out = String(data: outData, encoding: .utf8) ?? ""
+        let err = String(data: errBox.data, encoding: .utf8) ?? ""
         return (p.terminationStatus, out, err)
     }
 
@@ -122,6 +140,25 @@ extension Serve {
         guard r.code == 0 else { return nil }
         return r.out.split(separator: "\n").first.map(String.init)
     }
+
+    /// Probe the server's /mcp endpoint and describe the result. A `401` is the
+    /// "up + auth enforced" signal (the server rejects the unauthenticated probe);
+    /// any other HTTP code still means it's responding. A curl launch failure is
+    /// reported distinctly so callers never conflate "probe couldn't run" with "down".
+    static func livenessLine(host: String, port: Int) -> String {
+        let r = shell("/usr/bin/curl", ["-s", "-o", "/dev/null", "-w", "%{http_code}",
+                                        "--max-time", "3", "-X", "POST", "http://\(host):\(port)/mcp",
+                                        "-H", "Accept: application/json, text/event-stream", "-d", "{}"])
+        if r.code == 127 { return "could not run probe (curl unavailable at /usr/bin/curl)" }
+        switch r.out.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "401":     return "up (401 — auth enforced ✓)"
+        case "", "000": return "down (connection refused / no response)"
+        case let http:  return "up (HTTP \(http))"
+        }
+    }
+
+    /// True iff a `livenessLine` reports the server is actually responding.
+    static func isUp(_ line: String) -> Bool { line.hasPrefix("up") }
 
     static func run(_ argv: [String]) -> (stdout: String?, stderr: String?, exitCode: Int32) {
         let home = NSHomeDirectory()
@@ -200,26 +237,48 @@ extension Serve {
         if boot.code != 0 {
             return (nil, "launchctl bootstrap failed: \(boot.err)\nPlist written to \(plistFile).", 1)
         }
-        _ = shell("/bin/launchctl", ["kickstart", "-k", "gui/\(uid)/\(label)"])
+        let kick = shell("/bin/launchctl", ["kickstart", "-k", "gui/\(uid)/\(label)"])
+
+        // bootstrap/kickstart returning 0 only means the job LOADED, not that the server
+        // bound its port — so probe it (retrying briefly while launchd spawns the process)
+        // rather than blindly reporting success for a server that never came up.
+        var liveness = livenessLine(host: host, port: port)
+        var attempts = 0
+        while !isUp(liveness) && attempts < 8 {
+            Thread.sleep(forTimeInterval: 0.25); attempts += 1
+            liveness = livenessLine(host: host, port: port)
+        }
+        let started = kick.code == 0 && isUp(liveness)
 
         // Compose output.
         var out = ""
         if let binWarn { out += "\(binWarn)\n\n" }
-        out += "✓ apple-calendar server installed and started (\(host):\(port)).\n"
+        if started {
+            out += "✓ apple-calendar server installed and started (\(host):\(port)).\n"
+        } else {
+            out += "⚠️  apple-calendar server installed but did NOT come up (\(host):\(port)).\n"
+            out += "    Liveness: \(liveness)"
+            if kick.code != 0 { out += "; launchctl kickstart exited \(kick.code): \(kick.err.trimmingCharacters(in: .whitespacesAndNewlines))" }
+            out += "\n    Check `ical serve status` and the log at \(logPath(home: home)).\n"
+        }
         out += "  Token file: \(tokPath)\n"
         out += "  LaunchAgent: \(plistFile)  (survives reboot + brew upgrade)\n"
         if host == "127.0.0.1" {
             out += "  Bound to loopback — reachable only on this Mac. For another device rerun with --tailscale or --host <ip>.\n"
         }
-        // Warn if the maintainer's old personal agent is still loaded.
-        let legacy = "com.hunterbrewer.apple-calendar-mcp"
-        if shell("/bin/launchctl", ["print", "gui/\(uid)/\(legacy)"]).code == 0 {
-            out += "\n⚠️  An older agent (\(legacy)) is still loaded and may fight for the port.\n"
-            out += "   Remove it: launchctl bootout gui/\(uid)/\(legacy) && rm ~/Library/LaunchAgents/\(legacy).plist\n"
+        // Warn about other agents that could race for the same port: the maintainer's old
+        // personal LaunchAgent, or a `brew services` instance from the previously documented
+        // flow. (setup only ever manages its own `\(label)` label.)
+        for other in ["com.hunterbrewer.apple-calendar-mcp", "homebrew.mxcl.apple-calendar"]
+        where shell("/bin/launchctl", ["print", "gui/\(uid)/\(other)"]).code == 0 {
+            out += "\n⚠️  Another agent (\(other)) is still loaded and may fight for port \(port).\n"
+            out += other.hasPrefix("homebrew.")
+                ? "   Stop it: brew services stop apple-calendar\n"
+                : "   Remove it: launchctl bootout gui/\(uid)/\(other) && rm ~/Library/LaunchAgents/\(other).plist\n"
         }
         out += "\nClient config (paste on the other machine):\n\n\(clientConfigJSON(host: host, port: port, token: tok))\n"
         out += "\nOr with Claude Code:\n\n\(claudeMcpAddCommand(host: host, port: port, token: tok))\n"
-        return (out, nil, 0)
+        return (out, nil, started ? 0 : 1)
     }
 
     static func status(home: String) -> (String?, String?, Int32) {
@@ -234,17 +293,17 @@ extension Serve {
             out += "  \(pidLine.trimmingCharacters(in: .whitespaces))\n"
         }
         let tokPath = tokenPath(home: home)
-        let hasToken = (ServerConfig.readTokenFile(tokPath)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+        let token = ServerConfig.readTokenFile(tokPath)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasToken = (token?.isEmpty == false)
         out += "Token file: \(hasToken ? "present (\(tokPath))" : "missing")\n"
-        // Liveness probe against the *configured* address parsed back out of the plist, if any.
+        // Liveness probe against the *configured* address parsed back out of the plist.
         if let host = plistHost(plistFile: plistFile), let port = plistPort(plistFile: plistFile) {
-            let probe = shell("/usr/bin/curl", ["-s", "-o", "/dev/null", "-w", "%{http_code}",
-                                                "-X", "POST", "http://\(host):\(port)/mcp",
-                                                "-H", "Accept: application/json, text/event-stream", "-d", "{}"])
-            out += "Liveness (\(host):\(port)): \(probe.out == "401" ? "up (401 — auth enforced ✓)" : "code \(probe.out.isEmpty ? "no response" : probe.out)")\n"
-            if hasToken, let tok = ServerConfig.readTokenFile(tokPath)?.trimmingCharacters(in: .whitespacesAndNewlines) {
-                out += "\nClient config:\n\n\(clientConfigJSON(host: host, port: port, token: tok))\n"
+            out += "Liveness (\(host):\(port)): \(livenessLine(host: host, port: port))\n"
+            if let token, !token.isEmpty {
+                out += "\nClient config:\n\n\(clientConfigJSON(host: host, port: port, token: token))\n"
             }
+        } else if installed {
+            out += "Liveness: could not read --host/--port from \(plistFile) (unexpected plist format).\n"
         }
         return (out, nil, 0)
     }
@@ -264,17 +323,31 @@ extension Serve {
 
     static func uninstall(_ args: [String], home: String) -> (String?, String?, Int32) {
         let uid = getuid()
-        _ = shell("/bin/launchctl", ["bootout", "gui/\(uid)/\(label)"])
+        let fm = FileManager.default
+        _ = shell("/bin/launchctl", ["bootout", "gui/\(uid)/\(label)"])   // ignore "not loaded"
         let plistFile = plistPath(home: home)
-        try? FileManager.default.removeItem(atPath: plistFile)
+        var problems: [String] = []
+        // A leftover plist reloads at next login (RunAtLoad=true), resurrecting the agent
+        // the user believes is gone — a failed delete must be surfaced, not swallowed.
+        if fm.fileExists(atPath: plistFile) {
+            do { try fm.removeItem(atPath: plistFile) }
+            catch { problems.append("could not remove \(plistFile): \(error.localizedDescription) — it will reload at next login until deleted") }
+        }
         var out = "✓ Stopped and removed \(label).\n"
         if args.contains("--purge") {
-            try? FileManager.default.removeItem(atPath: configDir(home: home))
-            out += "  Purged \(configDir(home: home)) (token deleted).\n"
+            let dir = configDir(home: home)
+            if fm.fileExists(atPath: dir) {
+                // --purge is the credential-revocation path: if the token can't be deleted,
+                // do NOT claim it's gone (it may still authorize clients).
+                do { try fm.removeItem(atPath: dir) }
+                catch { problems.append("could not delete \(dir): \(error.localizedDescription) — the token may still be usable; remove it manually") }
+            }
+            if problems.isEmpty { out += "  Purged \(dir) (token deleted).\n" }
         } else {
             out += "  Token kept at \(tokenPath(home: home)) (use --purge to delete it too).\n"
         }
-        return (out, nil, 0)
+        if problems.isEmpty { return (out, nil, 0) }
+        return (out, "uninstall incomplete:\n  - " + problems.joined(separator: "\n  - "), 1)
     }
 
     static func token(home: String) -> (String?, String?, Int32) {

@@ -11,7 +11,17 @@ let argv = Array(CommandLine.arguments.dropFirst())
 // `ical serve ...` — lifecycle management for the networked HTTP server
 // (setup/status/uninstall/token via a user-owned LaunchAgent + token file).
 if argv.first == "serve" {
-    emit(Serve.run(Array(argv.dropFirst())))
+    let serveArgs = Array(argv.dropFirst())
+    // `serve token` prints the raw credential with NO trailing newline, so
+    // `ical serve token | pbcopy` copies the token exactly — a trailing "\n" would be
+    // pasted into the Bearer header and rejected. Other subcommands use emit's newline.
+    if serveArgs.first == "token" {
+        let r = Serve.token(home: NSHomeDirectory())
+        if let out = r.0 { FileHandle.standardOutput.write(Data(out.utf8)) }
+        if let err = r.1 { FileHandle.standardError.write(Data((err + "\n").utf8)) }
+        exit(r.2)
+    }
+    emit(Serve.run(serveArgs))
 }
 
 // `ical mcp ...` — stdio MCP server (Phase 2) or HTTP (Phase 3 stub).
