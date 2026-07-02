@@ -39,6 +39,23 @@ final class ServeTests: XCTestCase {
         XCTAssertTrue(cmd.contains("Authorization: Bearer abc"))
     }
 
+    func testClientConfigJSONEscapesSpecialChars() throws {
+        // A token/host with quotes, backslashes, or newlines must still yield parseable JSON
+        // and round-trip to the original value — otherwise the pasted client config is broken.
+        let json = Serve.clientConfigJSON(host: "1.2.3.4", port: 3456, token: "a\"b\\c\nd")
+        let obj = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+        let headers = ((obj?["mcpServers"] as? [String: Any])?["apple-calendar"] as? [String: Any])?["headers"] as? [String: Any]
+        XCTAssertEqual(headers?["Authorization"] as? String, "Bearer a\"b\\c\nd")
+    }
+
+    func testClaudeMcpAddCommandSingleQuotesAndEscapes() {
+        // The header must be single-quoted (no $VAR/backtick expansion) with an embedded single
+        // quote encoded as '\'' — so a hostile/odd token can't inject shell or break the command.
+        let cmd = Serve.claudeMcpAddCommand(host: "1.2.3.4", port: 3456, token: "a'b$c\"d")
+        XCTAssertTrue(cmd.contains("--header 'Authorization: Bearer a'\\''b$c\"d'"))
+        XCTAssertFalse(cmd.contains("\"Authorization"))   // no leftover double-quote wrapping
+    }
+
     func testResolveHostExplicitWins() {
         let r = Serve.resolveHost(explicitHost: "10.0.0.1", useTailscale: false, useLocal: false, tailscaleIP: { "100.1.1.1" })
         XCTAssertEqual(try? r.get(), "10.0.0.1")
@@ -87,6 +104,34 @@ final class ServeTests: XCTestCase {
                                                    fileExists: { $0 == "/usr/local/opt/apple-calendar/bin/ical" })
         XCTAssertEqual(path, "/usr/local/opt/apple-calendar/bin/ical")
         XCTAssertNil(warn)
+    }
+
+    func testResolveBinaryResolvesBareNameOnPath() {
+        // `ical` invoked from $PATH: argv0 is the bare name; it must be resolved to the absolute
+        // path found on $PATH so the LaunchAgent (which does no $PATH lookup) can start it.
+        let (path, warn) = Serve.resolveBinaryPath(
+            argv0: "ical",
+            fileExists: { $0 == "/custom/bin/ical" },   // not an opt path → found via PATH search
+            cwd: "/work", pathEnv: "/usr/bin:/custom/bin")
+        XCTAssertEqual(path, "/custom/bin/ical")
+        XCTAssertNil(warn)
+    }
+    func testResolveBinaryResolvesRelativePathAgainstCwd() {
+        // `.build/release/apple-calendar` is relative to cwd; it must be absolutized (and still
+        // flagged as a source build).
+        let (path, warn) = Serve.resolveBinaryPath(
+            argv0: ".build/release/apple-calendar",
+            fileExists: { _ in false }, cwd: "/work/proj", pathEnv: nil)
+        XCTAssertEqual(path, "/work/proj/.build/release/apple-calendar")
+        XCTAssertTrue(warn?.contains("/work/proj/.build/release/apple-calendar") == true)
+    }
+    func testResolveBinaryUnresolvableBareNameWarns() {
+        // Bare name not found anywhere on $PATH: we can't fabricate an absolute path, so return
+        // argv0 unchanged WITH a warning rather than silently emitting a plist that won't start.
+        let (path, warn) = Serve.resolveBinaryPath(
+            argv0: "ical", fileExists: { _ in false }, cwd: "/work", pathEnv: "/usr/bin:/bin")
+        XCTAssertEqual(path, "ical")
+        XCTAssertTrue(warn?.contains("could not resolve an absolute path") == true)
     }
 
     func testGenerateTokenIsHexOfRightLength() {

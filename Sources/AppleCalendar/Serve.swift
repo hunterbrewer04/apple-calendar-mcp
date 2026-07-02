@@ -25,6 +25,34 @@ enum Serve {
          .replacingOccurrences(of: "\"", with: "&quot;")
     }
 
+    // Escape a value for embedding inside a JSON string literal. Tokens this tool emits are
+    // hex, but a hand-written token file (or an odd --host) could contain quotes/backslashes/
+    // control chars; without escaping, the pasted client config would be invalid JSON.
+    static func jsonEscape(_ s: String) -> String {
+        var out = ""
+        for scalar in s.unicodeScalars {
+            switch scalar {
+            case "\"": out += "\\\""
+            case "\\": out += "\\\\"
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            default:
+                if scalar.value < 0x20 { out += String(format: "\\u%04x", scalar.value) }
+                else { out.unicodeScalars.append(scalar) }
+            }
+        }
+        return out
+    }
+
+    // Wrap a value in POSIX single quotes so the shell treats it literally — no $VAR/backtick
+    // expansion, no word-splitting. An embedded single quote is closed, escaped, and reopened
+    // (`'\''`), which is the standard safe encoding. This turns the copy/paste command from a
+    // shell-injection footgun into a value the shell passes through verbatim.
+    static func shellSingleQuote(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
     static func plistXML(binaryPath: String, host: String, port: Int, logPath: String) -> String {
         let args = [binaryPath, "mcp", "--http", "--host", host, "--port", String(port)]
         let argXML = args.map { "        <string>\(xmlEscape($0))</string>" }.joined(separator: "\n")
@@ -53,13 +81,14 @@ enum Serve {
     }
 
     static func clientConfigJSON(host: String, port: Int, token: String) -> String {
-        """
+        let h = jsonEscape(host); let t = jsonEscape(token)
+        return """
         {
           "mcpServers": {
             "apple-calendar": {
               "type": "http",
-              "url": "http://\(host):\(port)/mcp",
-              "headers": { "Authorization": "Bearer \(token)" }
+              "url": "http://\(h):\(port)/mcp",
+              "headers": { "Authorization": "Bearer \(t)" }
             }
           }
         }
@@ -68,7 +97,8 @@ enum Serve {
 
     static func claudeMcpAddCommand(host: String, port: Int, token: String) -> String {
         "claude mcp add --transport http --scope user apple-calendar "
-        + "http://\(host):\(port)/mcp --header \"Authorization: Bearer \(token)\""
+        + "\(shellSingleQuote("http://\(host):\(port)/mcp")) "
+        + "--header \(shellSingleQuote("Authorization: Bearer \(token)"))"
     }
 
     // MARK: - Resolution
@@ -88,13 +118,43 @@ enum Serve {
         return .success("127.0.0.1")   // secure-by-default
     }
 
-    static func resolveBinaryPath(argv0: String, fileExists: (String) -> Bool) -> (path: String, warning: String?) {
+    // Turn argv[0] into an absolute path. When `ical` is run from $PATH, argv[0] is the bare
+    // name "ical" (the shell doesn't rewrite it to the resolved path); a relative invocation
+    // like `.build/release/apple-calendar` is relative to cwd. launchd does NO $PATH lookup and
+    // requires an absolute executable in ProgramArguments[0], so we resolve it here. Returns nil
+    // if a bare name can't be found on $PATH.
+    static func absolutize(_ argv0: String, cwd: String, pathEnv: String?,
+                           fileExists: (String) -> Bool) -> String? {
+        if argv0.hasPrefix("/") { return argv0 }
+        if argv0.contains("/") {   // relative path → resolve against cwd (lexically, resolves ./ and ../)
+            return URL(fileURLWithPath: cwd).appendingPathComponent(argv0).standardized.path
+        }
+        for dir in (pathEnv ?? "").split(separator: ":", omittingEmptySubsequences: true).map(String.init) {
+            let base = dir.hasPrefix("/") ? dir : URL(fileURLWithPath: cwd).appendingPathComponent(dir).standardized.path
+            let candidate = "\(base)/\(argv0)"
+            if fileExists(candidate) { return candidate }
+        }
+        return nil
+    }
+
+    static func resolveBinaryPath(argv0: String, fileExists: (String) -> Bool,
+                                  cwd: String = FileManager.default.currentDirectoryPath,
+                                  pathEnv: String? = ProcessInfo.processInfo.environment["PATH"])
+    -> (path: String, warning: String?) {
         if let opt = optBinaryPaths.first(where: fileExists) { return (opt, nil) }
-        if argv0.contains("/.build/") {
-            return (argv0, "warning: pointing the service at a source build (\(argv0)); "
+        let resolved = absolutize(argv0, cwd: cwd, pathEnv: pathEnv, fileExists: fileExists) ?? argv0
+        if resolved.contains("/.build/") {
+            return (resolved, "warning: pointing the service at a source build (\(resolved)); "
                          + "install via Homebrew so upgrades don't dangle this path.")
         }
-        return (argv0, nil)
+        // A non-absolute path here means we couldn't resolve argv0 (bare name not on $PATH):
+        // launchd would silently fail to start the agent, so warn instead of reporting success.
+        if !resolved.hasPrefix("/") {
+            return (resolved, "warning: could not resolve an absolute path for '\(argv0)'; "
+                         + "the LaunchAgent needs one and may fail to start. Install via Homebrew, "
+                         + "or run setup using an absolute path to the binary.")
+        }
+        return (resolved, nil)
     }
 
     // MARK: - Token
