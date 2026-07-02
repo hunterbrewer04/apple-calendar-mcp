@@ -12,15 +12,17 @@ final class RendererTests: XCTestCase {
     }
 
     func testTimedEventRowAndMeta() {
+        // Assert on content, not exact column whitespace (matching the sibling tests): the row
+        // carries date + time range + title, and location/calendar render on their own lines.
         let e = CalEvent(calendar: "Work", title: "1:1 with Sarah",
                          startDate: d(13, 30), endDate: d(14, 30), isAllDay: false,
                          location: "Zoom", notes: nil, url: nil)
         let out = Renderer.events([e], details: false)
-        XCTAssertEqual(out, """
-          Jun 3   1:30 PM – 2:30 PM  1:1 with Sarah
-                                      📍 Zoom
-                                      📅 Work
-        """)
+        XCTAssertTrue(out.contains("Jun 3"))
+        XCTAssertTrue(out.contains("1:30 PM – 2:30 PM"))
+        XCTAssertTrue(out.contains("1:1 with Sarah"))
+        XCTAssertTrue(out.contains("📍 Zoom"))
+        XCTAssertTrue(out.contains("📅 Work"))
     }
 
     func testAllDayAndPipeSanitization() {

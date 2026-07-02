@@ -31,7 +31,7 @@ enum Renderer {
             lines.append("  \(pad(date, 6))  \(pad(time, 16))  \(oneLine(clean(e.title)))")
             var meta: [String] = []
             if let loc = e.location, !loc.isEmpty { meta.append("📍 \(oneLine(clean(loc)))") }
-            meta.append("📅 \(e.calendar)")
+            meta.append("📅 \(clean(e.calendar))")
             if details, let notes = e.notes {
                 for para in notes.components(separatedBy: .newlines) {
                     let p = para.trimmingCharacters(in: .whitespaces)
