@@ -48,4 +48,22 @@ final class RendererTests: XCTestCase {
     func testCalendarsOnePerLine() {
         XCTAssertEqual(Renderer.calendars(["A", "B"]), "A\nB")
     }
+
+    func testRawSanitizesCalendarDelimiter() {
+        // The calendar name is the first field of a |-delimited record. A | in it must be
+        // sanitized to / so it can't inject a phantom field and shift every column after it.
+        let e = CalEvent(calendar: "Bills | Subs", title: "RENT | Utilities",
+                         startDate: d(9, 0), endDate: d(9, 15), isAllDay: false,
+                         location: nil, notes: nil, url: nil)
+        let row = Renderer.raw([e])
+        XCTAssertEqual(row.components(separatedBy: "|").count, 9)   // exactly 9 fields, no injection
+        XCTAssertTrue(row.hasPrefix("Bills / Subs|"))              // calendar name sanitized in place
+    }
+
+    func testConfirmationSanitizesCalendarName() {
+        let e = CalEvent(calendar: "Bills | Subs", title: "Rent",
+                         startDate: d(9, 0), endDate: d(9, 15), isAllDay: false,
+                         location: nil, notes: nil, url: nil)
+        XCTAssertTrue(Renderer.confirmation(verb: "Created", event: e).contains("on Bills / Subs"))
+    }
 }

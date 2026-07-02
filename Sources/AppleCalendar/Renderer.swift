@@ -51,7 +51,7 @@ enum Renderer {
         let date = fmt(e.startDate, "MMM d")
         let time = e.isAllDay ? "all day" : "\(fmt(e.startDate, "h:mm a")) – \(fmt(e.endDate, "h:mm a"))"
         let idPart = e.id.map { " (id: \($0))" } ?? ""
-        return "\(verb) \"\(oneLine(e.title))\" — \(date), \(time) on \(e.calendar)\(idPart)"
+        return "\(verb) \"\(oneLine(e.title))\" — \(date), \(time) on \(clean(e.calendar))\(idPart)"
     }
 
     static func raw(_ events: [CalEvent]) -> String {
@@ -61,7 +61,7 @@ enum Renderer {
             let ts = e.isAllDay ? "" : fmt(e.startDate, "h:mm:ss a")
             let te = e.isAllDay ? "" : fmt(e.endDate, "h:mm:ss a")
             let desc = clean(e.notes).replacingOccurrences(of: "\n", with: "¶")
-            return "\(e.calendar)|\(ds)|\(ts)|\(te)|\(clean(e.title))|\(clean(e.location))|\(desc)|\(clean(e.url?.absoluteString))|\(e.id ?? "")"
+            return "\(clean(e.calendar))|\(ds)|\(ts)|\(te)|\(clean(e.title))|\(clean(e.location))|\(desc)|\(clean(e.url?.absoluteString))|\(e.id ?? "")"
         }.joined(separator: "\n")
     }
 
