@@ -165,6 +165,7 @@ Manage it any time:
 |---|---|
 | `ical serve status` | is it up? (expects `401` = up + auth enforced) + re-prints client config |
 | `ical serve token` | print the token (`ical serve token \| pbcopy`) |
+| `ical serve connect <ssh-host>` | one-command setup of a remote machine's Claude Code |
 | `ical serve uninstall` | stop and remove the background server (`--purge` also deletes the token) |
 
 > The HTTP server is **fail-closed**: with no token resolvable it refuses to start. (You can pass
@@ -216,7 +217,21 @@ It prints the token and the ready-to-paste client config. Grab the token again a
 
 ### On the other machine (the client)
 
-Point your MCP client at the Mac's address and include the **same token** as a bearer header:
+If Claude Code runs the client and you have **key-based ssh** to it, wire it up in one command
+**from the Mac** — no config editing on the other side:
+
+```bash
+ical serve connect brewserver      # any ssh host or ~/.ssh/config alias
+```
+
+It reads the running server's address and token, then over ssh installs the `apple-calendar`
+MCP server into that host's Claude Code (user scope) and probes the server *from* that host to
+confirm the server is reachable from that machine and auth is enforced. The token travels only
+over the ssh channel. On a host without key-based ssh, run `ical serve connect <host> --print`
+to print the `claude mcp add …` one-liner to paste there yourself.
+
+Otherwise, point your MCP client at the Mac's address and include the **same token** as a bearer
+header:
 
 ```json
 {

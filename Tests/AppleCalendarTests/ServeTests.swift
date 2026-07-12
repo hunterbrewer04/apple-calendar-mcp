@@ -167,6 +167,127 @@ final class ServeTests: XCTestCase {
         XCTAssertEqual(try? r.get(), "100.1.1.1")
     }
 
+    // MARK: - serve connect
+
+    func testRemoteConnectScriptEmbedsSingleQuotedURLAndToken() {
+        let s = Serve.remoteConnectScript(host: "100.1.2.3", port: 3456, token: "abc")
+        XCTAssertTrue(s.contains("'http://100.1.2.3:3456/mcp'"))
+        XCTAssertTrue(s.contains("'Authorization: Bearer abc'"))
+        // The reachability gate must use a bash-safe string comparison against 401.
+        XCTAssertTrue(s.contains("[ \"$code\" = \"401\" ]"))
+        XCTAssertTrue(s.contains("claude mcp add --transport http --scope user apple-calendar"))
+        XCTAssertTrue(s.contains("exit 40"))
+        XCTAssertTrue(s.contains("exit 41"))
+    }
+
+    func testRemoteConnectScriptEscapesHostileToken() {
+        // A token with a single quote / backslash must be encoded via '\'' so it can't break out
+        // of the single-quoted argument and inject shell.
+        let s = Serve.remoteConnectScript(host: "1.2.3.4", port: 3456, token: "a'b\\c")
+        XCTAssertTrue(s.contains("'Authorization: Bearer a'\\''b\\c'"))
+        // The literal token followed by an unescaped quote must never appear.
+        XCTAssertFalse(s.contains("Bearer a'b"))
+    }
+
+    func testSshConnectArgsShape() {
+        let script = "echo hi"
+        let args = Serve.sshConnectArgs(sshHost: "brewserver", script: script)
+        XCTAssertEqual(args, ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                              "brewserver", "bash", "-lc", "'echo hi'"])
+        // The whole script is ONE argv element (single-quoted), so the remote shell re-parses it
+        // as a single command rather than splitting it on spaces.
+        XCTAssertEqual(args.last, Serve.shellSingleQuote(script))
+    }
+
+    func testSshConnectArgsScriptWithQuotesIsOneEscapedElement() {
+        let script = Serve.remoteConnectScript(host: "1.2.3.4", port: 3456, token: "abc")
+        let args = Serve.sshConnectArgs(sshHost: "host", script: script)
+        XCTAssertEqual(args.count, 8)
+        // Even though the script itself is full of single quotes, it survives as a single arg.
+        XCTAssertEqual(args.last, Serve.shellSingleQuote(script))
+    }
+
+    func testParseConnectArgsMissingHost() {
+        XCTAssertEqual(Serve.parseConnectArgs([]), .failure(.missingHost))
+        XCTAssertEqual(Serve.parseConnectArgs(["--print"]), .failure(.missingHost))
+    }
+
+    func testParseConnectArgsHostAndPrintAnyOrder() {
+        XCTAssertEqual(Serve.parseConnectArgs(["brewserver"]),
+                       .success(Serve.ConnectArgs(sshHost: "brewserver", printOnly: false)))
+        XCTAssertEqual(Serve.parseConnectArgs(["brewserver", "--print"]),
+                       .success(Serve.ConnectArgs(sshHost: "brewserver", printOnly: true)))
+        XCTAssertEqual(Serve.parseConnectArgs(["--print", "brewserver"]),
+                       .success(Serve.ConnectArgs(sshHost: "brewserver", printOnly: true)))
+    }
+
+    func testParseConnectArgsRejectsUnknownFlag() {
+        XCTAssertEqual(Serve.parseConnectArgs(["brewserver", "--nope"]), .failure(.unknownFlag("--nope")))
+    }
+
+    func testParseConnectArgsRejectsExtraPositional() {
+        XCTAssertEqual(Serve.parseConnectArgs(["a", "b"]), .failure(.unexpectedArg("b")))
+    }
+
+    func testParseConnectArgsRejectsDashHost() {
+        // A host beginning with '-' would be parsed by OpenSSH as an option (e.g. -oProxyCommand=...)
+        // and could execute an arbitrary local command; the parser must reject it.
+        XCTAssertEqual(Serve.parseConnectArgs(["-oProxyCommand=touch /tmp/pwned"]),
+                       .failure(.invalidHost("-oProxyCommand=touch /tmp/pwned")))
+        XCTAssertEqual(Serve.parseConnectArgs(["-J", "jump"]), .failure(.invalidHost("-J")))
+    }
+
+    func testConnectResultMessageSuccess() {
+        let (out, err, code) = Serve.connectResultMessage(
+            code: 0, sshHost: "brewserver", url: "http://100.1.2.3:3456/mcp",
+            childOut: "connected", childErr: "")
+        XCTAssertEqual(code, 0)
+        XCTAssertNil(err)
+        XCTAssertTrue(out?.contains("brewserver") == true)
+        XCTAssertTrue(out?.contains("http://100.1.2.3:3456/mcp") == true)
+    }
+
+    func testConnectResultMessageClaudeMissing() {
+        let (out, err, code) = Serve.connectResultMessage(
+            code: 40, sshHost: "brewserver", url: "http://1.2.3.4:3456/mcp",
+            childOut: "", childErr: "claude CLI not found on this host (login-shell PATH)")
+        XCTAssertEqual(code, 40)
+        XCTAssertNil(out)
+        XCTAssertTrue(err?.contains("claude CLI was not found") == true)
+        XCTAssertTrue(err?.contains("Install Claude Code") == true)
+    }
+
+    func testConnectResultMessageUnreachableIncludesStderr() {
+        let (out, err, code) = Serve.connectResultMessage(
+            code: 41, sshHost: "brewserver", url: "http://1.2.3.4:3456/mcp",
+            childOut: "", childErr: "probe from this host returned 000 (expected 401)")
+        XCTAssertEqual(code, 41)
+        XCTAssertNil(out)
+        XCTAssertTrue(err?.contains("could not reach the server") == true)
+        XCTAssertTrue(err?.contains("curl is not installed") == true)   // curl-missing hint
+        XCTAssertTrue(err?.contains("probe from this host returned 000") == true)
+    }
+
+    func testConnectResultMessageSshFailure() {
+        let (out, err, code) = Serve.connectResultMessage(
+            code: 255, sshHost: "brewserver", url: "http://1.2.3.4:3456/mcp",
+            childOut: "", childErr: "Permission denied (publickey).")
+        XCTAssertEqual(code, 255)
+        XCTAssertNil(out)
+        XCTAssertTrue(err?.contains("ssh to brewserver failed") == true)
+        XCTAssertTrue(err?.contains("Permission denied (publickey).") == true)
+    }
+
+    func testConnectResultMessageGenericFailure() {
+        let (out, err, code) = Serve.connectResultMessage(
+            code: 7, sshHost: "brewserver", url: "http://1.2.3.4:3456/mcp",
+            childOut: "", childErr: "something else")
+        XCTAssertEqual(code, 7)
+        XCTAssertNil(out)
+        XCTAssertTrue(err?.contains("connect failed on brewserver (exit 7)") == true)
+        XCTAssertTrue(err?.contains("something else") == true)
+    }
+
     func testPlistXMLEscapesPathValues() {
         // Exercise xmlEscape *inside* plistXML: a home dir / path with & and < must be escaped
         // so the generated plist stays well-formed.

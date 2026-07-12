@@ -101,6 +101,59 @@ enum Serve {
         + "--header \(shellSingleQuote("Authorization: Bearer \(token)"))"
     }
 
+    // The script `serve connect` runs on the remote box to register this Mac's server with the
+    // remote Claude Code. The URL and Authorization header are single-quoted so a hostile/odd
+    // token can't inject shell. Distinct exit codes (40/41) let the caller map failures to
+    // actionable messages: 40 = no claude CLI on the remote, 41 = remote can't reach the server.
+    static func remoteConnectScript(host: String, port: Int, token: String) -> String {
+        let url = shellSingleQuote("http://\(host):\(port)/mcp")
+        let auth = shellSingleQuote("Authorization: Bearer \(token)")
+        return """
+        set -e
+        command -v claude >/dev/null 2>&1 || { echo 'claude CLI not found on this host (login-shell PATH)' >&2; exit 40; }
+        claude mcp remove --scope user apple-calendar >/dev/null 2>&1 || true
+        claude mcp add --transport http --scope user apple-calendar \(url) --header \(auth)
+        code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST \(url) -H 'Accept: application/json, text/event-stream' -d '{}')
+        [ "$code" = "401" ] || { echo "probe from this host returned ${code:-none} (expected 401)" >&2; exit 41; }
+        echo connected
+        """
+    }
+
+    // argv for `/usr/bin/ssh` to run `script` on `sshHost`. The `bash -lc` + outer
+    // shellSingleQuote is load-bearing: ssh joins the trailing args with spaces and the REMOTE
+    // shell re-parses them, so the whole script must arrive as ONE single-quoted argument or its
+    // own quoting would be re-split. A login shell (`-l`) is required because `claude` is often at
+    // ~/.local/bin, which only a login shell's PATH includes. BatchMode fails fast instead of
+    // hanging on a password prompt; ConnectTimeout bounds an unreachable host.
+    static func sshConnectArgs(sshHost: String, script: String) -> [String] {
+        ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", sshHost, "bash", "-lc", shellSingleQuote(script)]
+    }
+
+    // MARK: - connect args
+    struct ConnectArgs: Equatable { var sshHost: String; var printOnly: Bool }
+    enum ConnectParseError: Error, Equatable {
+        case missingHost; case unknownFlag(String); case unexpectedArg(String); case invalidHost(String)
+    }
+
+    /// Parse the args after `serve connect`: one required ssh-host positional and an optional
+    /// `--print` flag (accepted in any position). Pure so it's testable without I/O.
+    static func parseConnectArgs(_ args: [String]) -> Result<ConnectArgs, ConnectParseError> {
+        var host: String?
+        var printOnly = false
+        for a in args {
+            if a == "--print" { printOnly = true }
+            else if a.hasPrefix("--") { return .failure(.unknownFlag(a)) }
+            // A host starting with '-' is rejected here: OpenSSH has no `--` terminator, so a value
+            // like `-oProxyCommand=...` would be parsed as an ssh option and execute an arbitrary
+            // LOCAL command. The single-dash guard (not just `--`) is the fix and must stay.
+            else if a.hasPrefix("-") { return .failure(.invalidHost(a)) }
+            else if host == nil { host = a }
+            else { return .failure(.unexpectedArg(a)) }
+        }
+        guard let host else { return .failure(.missingHost) }
+        return .success(ConnectArgs(sshHost: host, printOnly: printOnly))
+    }
+
     // MARK: - Resolution
     enum ServeError: Error, Equatable { case tailscaleUnavailable; case conflictingHostFlags }
 
@@ -227,12 +280,14 @@ extension Serve {
         switch sub {
         case "setup":     return setup(rest, home: home)
         case "status":    return status(home: home)
+        case "connect":   return connect(rest, home: home)
         case "uninstall": return uninstall(rest, home: home)
         case "token":     return token(home: home)
         default:
             return (nil, """
             Usage: ical serve setup [--host IP | --tailscale | --local] [--port N] [--force]
                    ical serve status
+                   ical serve connect <ssh-host> [--print]
                    ical serve uninstall [--purge]
                    ical serve token
             """, 1)
@@ -366,6 +421,78 @@ extension Serve {
             out += "Liveness: could not read --host/--port from \(plistFile) (unexpected plist format).\n"
         }
         return (out, nil, 0)
+    }
+
+    /// `ical serve connect <ssh-host> [--print]` — from this Mac (running the server), point a
+    /// remote box's Claude Code at this server over Tailscale. Reads the installed config, refuses
+    /// to hand out a loopback-only or dead server, then either prints the paste-able command
+    /// (`--print`) or ssh's in and runs the registration + a 401 reachability probe.
+    static func connect(_ args: [String], home: String) -> (String?, String?, Int32) {
+        let usage = "Usage: ical serve connect <ssh-host> [--print]"
+        let parsed: ConnectArgs
+        switch parseConnectArgs(args) {
+        case .success(let c): parsed = c
+        case .failure(.missingHost):        return (nil, usage, 1)
+        case .failure(.unknownFlag(let f)): return (nil, "Unknown flag '\(f)'.\n\(usage)", 1)
+        case .failure(.unexpectedArg(let a)): return (nil, "Unexpected argument '\(a)'.\n\(usage)", 1)
+        case .failure(.invalidHost(let h)): return (nil, "ssh host may not begin with '-' (got '\(h)').\n\(usage)", 1)
+        }
+
+        // Resolve the configured address from the installed plist and the token from disk.
+        let plistFile = plistPath(home: home)
+        guard let host = plistHost(plistFile: plistFile), let port = plistPort(plistFile: plistFile) else {
+            return (nil, "Could not read the installed server config from \(plistFile). Run `ical serve setup --tailscale` first.", 1)
+        }
+        guard let token = ServerConfig.readTokenFile(tokenPath(home: home))?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.isEmpty else {
+            return (nil, "No auth token found at \(tokenPath(home: home)). Run `ical serve setup --tailscale` first.", 1)
+        }
+        // A loopback-only server is unreachable from any other host.
+        if host == "127.0.0.1" {
+            return (nil, "The server is bound to loopback (127.0.0.1) and is unreachable from another host. Rerun `ical serve setup --tailscale`.", 1)
+        }
+        // Never hand a dead server to a client.
+        let liveness = livenessLine(host: host, port: port)
+        guard isUp(liveness) else {
+            return (nil, "Server is not up at \(host):\(port): \(liveness)\nStart it and check `ical serve status` before connecting a client.", 1)
+        }
+
+        let url = "http://\(host):\(port)/mcp"
+        if parsed.printOnly {
+            return (claudeMcpAddCommand(host: host, port: port, token: token), nil, 0)
+        }
+
+        let r = shell("/usr/bin/ssh", sshConnectArgs(sshHost: parsed.sshHost,
+                                                     script: remoteConnectScript(host: host, port: port, token: token)))
+        return connectResultMessage(code: r.code, sshHost: parsed.sshHost, url: url, childOut: r.out, childErr: r.err)
+    }
+
+    /// Map the ssh child's exit code to a user-facing result. Pure so each branch is unit-testable
+    /// without spawning ssh. The exit codes come from `remoteConnectScript` (40/41) or ssh itself.
+    static func connectResultMessage(code: Int32, sshHost: String, url: String,
+                                     childOut: String, childErr: String) -> (String?, String?, Int32) {
+        let err = childErr.trimmingCharacters(in: .whitespacesAndNewlines)
+        let out = childOut.trimmingCharacters(in: .whitespacesAndNewlines)
+        let errTail = err.isEmpty ? "" : "\n\(err)"
+        switch code {
+        case 0:
+            var msg = "✓ Connected \(sshHost) to the apple-calendar MCP server at \(url).\n"
+            msg += "  Registered user-scope for Claude Code on \(sshHost) (claude mcp add --scope user apple-calendar).\n"
+            if !out.isEmpty { msg += "  Remote: \(out)\n" }
+            return (msg, nil, 0)
+        case 40:
+            return (nil, "The claude CLI was not found on \(sshHost). Install Claude Code there, then rerun." + errTail, 40)
+        case 41:
+            // Empty $code also fails the 401 check, so a remote box that merely lacks curl lands here too.
+            return (nil, "\(sshHost) could not reach the server over the tailnet at \(url) "
+                       + "(or curl is not installed there)." + errTail, 41)
+        case 255:
+            // ssh returns 255 both for its OWN transport/auth failures AND when it propagates a remote
+            // command that itself exited 255 — so this diagnosis can be wrong in that rare collision.
+            return (nil, "ssh to \(sshHost) failed. Ensure key auth works and that `ssh \(sshHost)` connects non-interactively." + errTail, 255)
+        default:
+            return (nil, "connect failed on \(sshHost) (exit \(code))." + errTail, code)
+        }
     }
 
     /// Read the --host / --port back out of the installed plist for status/probe.
