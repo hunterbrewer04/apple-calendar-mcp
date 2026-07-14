@@ -10,7 +10,7 @@ Calendar.app never has to be open and nothing leaves your machine.
 - 🗓️ **Instant queries** — today, this week, a specific calendar, the next N days.
 - ✏️ **Create, update, and delete events** — from the CLI or any MCP client.
 - 🔌 **Two ways to connect** — a local `stdio` server, or an HTTP server other machines can reach.
-- 🔐 **Token-gated network access** — the HTTP server refuses to start without a token.
+- 🔐 **Per-client tokens** — each machine gets its own revocable credential; the server refuses to start with none.
 - 🍺 **One-command install** — Homebrew builds, code-signs, and (optionally) runs it for you.
 
 ---
@@ -164,9 +164,13 @@ Manage it any time:
 | Command | Does |
 |---|---|
 | `ical serve status` | is it up? (expects `401` = up + auth enforced) + re-prints client config |
-| `ical serve token` | print the token (`ical serve token \| pbcopy`) |
+| `ical serve token` | print the **default** token (`ical serve token \| pbcopy`) |
+| `ical serve token add <client> [--force]` | mint a token for a named client (errors if it already exists, unless `--force`) |
+| `ical serve token show <client>` | print that client's token (`ical serve token show brewserver \| pbcopy`) |
+| `ical serve token revoke <client>` | delete a client's token — that machine loses access within ~5s |
+| `ical serve token list` | list every client + a `sha256:` fingerprint (never prints raw tokens) |
 | `ical serve connect <ssh-host>` | one-command setup of a remote machine's Claude Code |
-| `ical serve uninstall` | stop and remove the background server (`--purge` also deletes the token) |
+| `ical serve uninstall` | stop and remove the background server (`--purge` also deletes all tokens) |
 
 > The HTTP server is **fail-closed**: with no token resolvable it refuses to start. (You can pass
 > `--no-auth` to override that, but only on a fully trusted, isolated interface.)
@@ -224,14 +228,20 @@ If Claude Code runs the client and you have **key-based ssh** to it, wire it up 
 ical serve connect brewserver      # any ssh host or ~/.ssh/config alias
 ```
 
-It reads the running server's address and token, then over ssh installs the `apple-calendar`
-MCP server into that host's Claude Code (user scope) and probes the server *from* that host to
-confirm the server is reachable from that machine and auth is enforced. The token travels only
-over the ssh channel. On a host without key-based ssh, run `ical serve connect <host> --print`
-to print the `claude mcp add …` one-liner to paste there yourself.
+It mints (or reuses, on a repeat run) a **token scoped to that ssh host** — not the shared
+default token — then over ssh installs the `apple-calendar` MCP server into that host's Claude
+Code (user scope) and probes the server *from* that host to confirm the server is reachable from
+that machine and auth is enforced. The token travels only over the ssh channel. On a host without
+key-based ssh, run `ical serve connect <host> --print` to print the `claude mcp add …` one-liner
+to paste there yourself — it's built with that same per-host token.
 
-Otherwise, point your MCP client at the Mac's address and include the **same token** as a bearer
-header:
+Because each machine gets its own credential, you can cut one off without touching the rest:
+`ical serve token revoke <host>` deletes just that host's token, and a running server rejects it
+within ~5 seconds — every other connected client keeps working.
+
+Otherwise — no ssh, or a client that isn't Claude Code — mint that client its own token by hand
+with `ical serve token add <client>` (see the [`ical serve`](#mode-2--networked-http) table
+above), then point the MCP client at the Mac's address and include the token as a bearer header:
 
 ```json
 {
@@ -374,12 +384,14 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:3456/mcp \
 
 | Setting | Env var | Default | Notes |
 |---|---|---|---|
-| Token | `CALENDAR_MCP_TOKEN` | — | HTTP mode needs a token from **some** source — this env var **or** the token file below; compared in constant time |
-| Token file | `CALENDAR_MCP_TOKEN_FILE` | `~/.config/apple-calendar/token` | Read when `CALENDAR_MCP_TOKEN` is unset; `serve setup` writes it |
+| Token | `CALENDAR_MCP_TOKEN` | — | HTTP mode needs a token from **some** source — this env var, the token file below, or a client token; compared in constant time |
+| Token file | `CALENDAR_MCP_TOKEN_FILE` | `~/.config/apple-calendar/token` | the legacy shared/default token; overrides the default path; `serve setup` writes it |
+| Client tokens | — | `~/.config/apple-calendar/tokens/<client>` | one file per client, managed by `ical serve token` / `serve connect`; unioned with the sources above |
 | Bind address | `CALENDAR_MCP_HOST` | `127.0.0.1` | set to your VPN IP to allow remote clients |
 | Port | `CALENDAR_MCP_PORT` | `3456` | |
 
-Token precedence: `CALENDAR_MCP_TOKEN` env → `CALENDAR_MCP_TOKEN_FILE` → default file.
+All token sources are a **union** — the env token, the default file, and every named client file
+in `tokens/` are valid at once; any of them authorizes a request.
 
 The same three can be passed on the command line: `--host`, `--port`, and `--no-auth`.
 
@@ -390,10 +402,16 @@ The same three can be passed on the command line: `--host`, `--port`, and `--no-
 - **Read *and* write.** The tool can query events and also create, update, and delete them. There
   is no read-only mode — anyone who can call the server can change your calendar, so treat access
   to it (and its token) accordingly.
-- **Token required, fail-closed.** The HTTP server won't start without `CALENDAR_MCP_TOKEN`, and
-  rejects any request whose `Authorization: Bearer …` header doesn't match (constant-time compare).
-  Because the HTTP server also exposes the write tools, keeping the token secret matters more than
-  ever.
+- **Token required, fail-closed.** The HTTP server won't start without a resolvable token from
+  any source, and rejects any request whose `Authorization: Bearer …` header doesn't match
+  (constant-time compare). Because the HTTP server also exposes the write tools, keeping tokens
+  secret matters more than ever.
+- **Per-client tokens, unioned.** The env token, the default token file, and every named file in
+  `~/.config/apple-calendar/tokens/` are all valid at once — any of them authorizes a request, and
+  each is checked with the same constant-time comparison. Every session is logged with the client
+  it matched (`session <id> client=<name>` in `~/Library/Logs/apple-calendar.log`), and revoking a
+  token (`ical serve token revoke <client>`) takes effect on a running server within ~5 seconds —
+  no restart. If every token is revoked, the server rejects every request.
 - **No built-in encryption.** HTTP mode is plain HTTP — only run it on a trusted private network
   (loopback or a VPN), never on the public internet.
 - **macOS permission, pinned to the binary.** Calendar access is granted by macOS per code
