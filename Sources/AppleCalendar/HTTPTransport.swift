@@ -32,6 +32,15 @@ enum HTTPRunner {
         let sessions = SessionManager(store: store, validationPipeline: pipeline)
         await sessions.startReaper()
 
+        // Live token view: `serve token add`/`revoke` on this Mac take effect within the
+        // TTL without restarting the server (which would drop every client's session).
+        // Under --no-auth files are never consulted, so the cache serves the startup
+        // snapshot (env-only) forever.
+        let env = ProcessInfo.processInfo.environment
+        let tokenCache = TokenCache { [tokens = config.tokens, allowNoAuth = config.allowNoAuth, home = config.homeDir] in
+            allowNoAuth ? tokens : TokenStore.load(env: env, homeDir: home, allowNoAuth: false)
+        }
+
         // Build a Hummingbird router that bridges HTTP requests to the SDK transport.
         let router = Router()
 
@@ -39,7 +48,9 @@ enum HTTPRunner {
         @Sendable func mcpHandler(request: Hummingbird.Request, context: some Hummingbird.RequestContext) async throws -> Hummingbird.Response {
             // --- Auth gate ---
             let authHeader = request.headers[.authorization]
-            guard Auth.authorize(header: authHeader, token: config.token) else {
+            guard let client = Auth.authorize(header: authHeader,
+                                              tokens: await tokenCache.current(),
+                                              open: config.isOpen) else {
                 return Hummingbird.Response(
                     status: .unauthorized,
                     headers: [.contentType: "text/plain", .wwwAuthenticate: "Bearer"],
@@ -70,7 +81,7 @@ enum HTTPRunner {
             )
 
             // --- Dispatch through the per-session manager ---
-            let sdkResponse = await sessions.handle(sdkRequest)
+            let sdkResponse = await sessions.handle(sdkRequest, client: client)
 
             // --- Convert SDK response to Hummingbird response ---
             return buildHummingbirdResponse(from: sdkResponse)
@@ -160,7 +171,7 @@ actor SessionManager {
         self.idleTimeout = idleTimeout
     }
 
-    func handle(_ request: MCP.HTTPRequest) async -> MCP.HTTPResponse {
+    func handle(_ request: MCP.HTTPRequest, client: String) async -> MCP.HTTPResponse {
         let sessionID = request.header(HTTPHeaderName.sessionID)
 
         // Route to an existing session.
@@ -179,7 +190,7 @@ actor SessionManager {
 
         // No live session: only an `initialize` POST may create one.
         if request.method.uppercased() == "POST", Self.isInitializeRequest(request.body) {
-            return await createSessionAndHandle(request)
+            return await createSessionAndHandle(request, client: client)
         }
 
         // No session and not an initialize.
@@ -189,7 +200,7 @@ actor SessionManager {
         return .error(statusCode: 400, .invalidRequest("Bad Request: Missing \(HTTPHeaderName.sessionID) header"))
     }
 
-    private func createSessionAndHandle(_ request: MCP.HTTPRequest) async -> MCP.HTTPResponse {
+    private func createSessionAndHandle(_ request: MCP.HTTPRequest, client: String) async -> MCP.HTTPResponse {
         let sessionID = UUID().uuidString
         let transport = StatefulHTTPServerTransport(
             sessionIDGenerator: FixedSessionIDGenerator(sessionID: sessionID),
@@ -205,6 +216,9 @@ actor SessionManager {
         }
 
         sessions[sessionID] = Session(server: server, transport: transport, lastAccessed: Date())
+        // One line per session (not per request) into the LaunchAgent log, so `ical serve`
+        // deployments can tell WHICH machine's credential opened each session.
+        FileHandle.standardError.write(Data("session \(sessionID) client=\(client)\n".utf8))
 
         let response = await transport.handleRequest(request)
         // If the transport rejected the initialize, don't leak the session.

@@ -37,6 +37,7 @@ if argv.first == "mcp" {
             FileHandle.standardError.write("""
             Refusing to start: no auth token found. Provide one via any of:
               • run `ical serve setup` (writes ~/.config/apple-calendar/token), or
+              • run `ical serve token add <client>` (writes ~/.config/apple-calendar/tokens/<client>), or
               • set CALENDAR_MCP_TOKEN, or
               • set CALENDAR_MCP_TOKEN_FILE to a file containing the token, or
               • create ~/.config/apple-calendar/token.

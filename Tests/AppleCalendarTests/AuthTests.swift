@@ -2,116 +2,117 @@ import XCTest
 @testable import apple_calendar
 
 final class AuthTests: XCTestCase {
+    // MARK: - Auth.authorize
     func testRejectsMissingAndWrongHeader() {
-        XCTAssertFalse(Auth.authorize(header: nil, token: "s3cret"))
-        XCTAssertFalse(Auth.authorize(header: "Bearer nope", token: "s3cret"))
+        let tokens = ["s3cret": "default"]
+        XCTAssertNil(Auth.authorize(header: nil, tokens: tokens, open: false))
+        XCTAssertNil(Auth.authorize(header: "Bearer nope", tokens: tokens, open: false))
     }
-    func testAcceptsExactBearer() {
-        XCTAssertTrue(Auth.authorize(header: "Bearer s3cret", token: "s3cret"))
+    func testAcceptsExactBearerAndReturnsClientName() {
+        XCTAssertEqual(Auth.authorize(header: "Bearer s3cret",
+                                      tokens: ["s3cret": "brewserver", "other": "env"],
+                                      open: false), "brewserver")
+    }
+    func testEmptyTokenSetDeniesEverything() {
+        // All tokens revoked at runtime: fail closed, even a stale-but-plausible header.
+        XCTAssertNil(Auth.authorize(header: "Bearer anything", tokens: [:], open: false))
+        XCTAssertNil(Auth.authorize(header: nil, tokens: [:], open: false))
+    }
+    func testOpenModeAdmitsEverythingAsAnonymous() {
+        XCTAssertEqual(Auth.authorize(header: nil, tokens: [:], open: true), "anonymous")
+        XCTAssertEqual(Auth.authorize(header: "Bearer junk", tokens: [:], open: true), "anonymous")
+    }
+
+    // MARK: - ServerConfig
+    private func config(env: [String: String] = [:], argv: [String] = [],
+                        files: [String: String] = [:], dir: [String] = []) -> ServerConfig {
+        ServerConfig.fromEnvironment(env, argv: argv, readFile: { files[$0] },
+                                     homeDir: "/home/u", listDir: { _ in dir })
     }
     func testConfigDefaults() {
-        let c = ServerConfig.fromEnvironment([:], argv: [], readFile: { _ in nil })
+        let c = config()
         XCTAssertEqual(c.port, 3456)
         XCTAssertEqual(c.host, "127.0.0.1")
-        XCTAssertNil(c.token)
+        XCTAssertTrue(c.tokens.isEmpty)
         XCTAssertFalse(c.allowNoAuth)
+        XCTAssertEqual(c.homeDir, "/home/u")
     }
     func testFailsClosedWithoutToken() {
-        let c = ServerConfig.fromEnvironment([:], argv: [], readFile: { _ in nil })
-        XCTAssertThrowsError(try c.validate()) { XCTAssertEqual($0 as? StartupError, .missingToken) }
+        XCTAssertThrowsError(try config().validate()) { XCTAssertEqual($0 as? StartupError, .missingToken) }
     }
     func testNoAuthFlagAllowsMissingToken() {
-        let c = ServerConfig.fromEnvironment([:], argv: ["--no-auth"])
+        let c = config(argv: ["--no-auth"])
         XCTAssertNoThrow(try c.validate())
+        XCTAssertTrue(c.isOpen)
     }
     func testEnvOverrides() {
-        let c = ServerConfig.fromEnvironment(
-            ["CALENDAR_MCP_HOST": "100.1.1.1", "CALENDAR_MCP_PORT": "9000", "CALENDAR_MCP_TOKEN": "t"],
-            argv: ["--http"])
-        XCTAssertEqual(c.host, "100.1.1.1"); XCTAssertEqual(c.port, 9000); XCTAssertEqual(c.token, "t")
+        let c = config(env: ["CALENDAR_MCP_HOST": "100.1.1.1", "CALENDAR_MCP_PORT": "9000",
+                             "CALENDAR_MCP_TOKEN": "t"], argv: ["--http"])
+        XCTAssertEqual(c.host, "100.1.1.1"); XCTAssertEqual(c.port, 9000)
+        XCTAssertEqual(c.tokens, ["t": "env"])
     }
     func testReadsTokenFromDefaultFileWhenEnvAbsent() {
-        let c = ServerConfig.fromEnvironment(
-            [:], argv: [],
-            readFile: { $0 == "/home/u/.config/apple-calendar/token" ? "filetoken\n" : nil },
-            homeDir: "/home/u")
-        XCTAssertEqual(c.token, "filetoken")           // trimmed
+        let c = config(files: ["/home/u/.config/apple-calendar/token": "filetoken\n"])
+        XCTAssertEqual(c.tokens, ["filetoken": "default"])     // trimmed
         XCTAssertNoThrow(try c.validate())
     }
-    func testEnvTokenWinsOverFile() {
-        let c = ServerConfig.fromEnvironment(
-            ["CALENDAR_MCP_TOKEN": "envtoken"], argv: [],
-            readFile: { _ in "filetoken" }, homeDir: "/home/u")
-        XCTAssertEqual(c.token, "envtoken")
+    func testEnvAndFileTokensBothValid() {
+        // Multi-token semantics: sources are a union (v1.2.0 shadowing removed by design).
+        let c = config(env: ["CALENDAR_MCP_TOKEN": "envtoken"],
+                       files: ["/home/u/.config/apple-calendar/token": "filetoken"])
+        XCTAssertEqual(c.tokens, ["envtoken": "env", "filetoken": "default"])
+    }
+    func testClientTokenDirIsLoaded() {
+        let c = config(files: ["/home/u/.config/apple-calendar/tokens/brewserver": "brewtok\n"],
+                       dir: ["brewserver"])
+        XCTAssertEqual(c.tokens, ["brewtok": "brewserver"])
+        XCTAssertNoThrow(try c.validate())
     }
     func testTokenFileEnvVarOverridesDefaultPath() {
-        let c = ServerConfig.fromEnvironment(
-            ["CALENDAR_MCP_TOKEN_FILE": "/custom/tok"], argv: [],
-            readFile: { $0 == "/custom/tok" ? "customtoken" : nil },
-            homeDir: "/home/u")
-        XCTAssertEqual(c.token, "customtoken")
+        let c = config(env: ["CALENDAR_MCP_TOKEN_FILE": "/custom/tok"],
+                       files: ["/custom/tok": "customtoken"])
+        XCTAssertEqual(c.tokens, ["customtoken": "default"])
     }
     func testEmptyTokenFileFailsClosed() {
-        let c = ServerConfig.fromEnvironment(
-            [:], argv: [], readFile: { _ in "   \n" }, homeDir: "/home/u")
-        XCTAssertNil(c.token)
+        let c = config(files: ["/home/u/.config/apple-calendar/token": "   \n"])
+        XCTAssertTrue(c.tokens.isEmpty)
         XCTAssertThrowsError(try c.validate()) { XCTAssertEqual($0 as? StartupError, .missingToken) }
     }
     func testWhitespaceEnvTokenFallsThroughToFile() {
-        // A fat-fingered CALENDAR_MCP_TOKEN=" " must not shadow a valid file token.
-        let c = ServerConfig.fromEnvironment(
-            ["CALENDAR_MCP_TOKEN": "   "], argv: [],
-            readFile: { _ in "filetoken" }, homeDir: "/home/u")
-        XCTAssertEqual(c.token, "filetoken")
-    }
-    func testCustomTokenFileEmptyFailsClosed() {
-        let c = ServerConfig.fromEnvironment(
-            ["CALENDAR_MCP_TOKEN_FILE": "/custom/tok"], argv: [],
-            readFile: { $0 == "/custom/tok" ? "  \n" : nil }, homeDir: "/home/u")
-        XCTAssertNil(c.token)
-        XCTAssertThrowsError(try c.validate()) { XCTAssertEqual($0 as? StartupError, .missingToken) }
+        let c = config(env: ["CALENDAR_MCP_TOKEN": "   "],
+                       files: ["/home/u/.config/apple-calendar/token": "filetoken"])
+        XCTAssertEqual(c.tokens, ["filetoken": "default"])
     }
     func testEmptyTokenFileEnvVarFallsBackToDefaultPath() {
-        // CALENDAR_MCP_TOKEN_FILE="" (e.g. an unset shell var) must not suppress the default file.
-        let c = ServerConfig.fromEnvironment(
-            ["CALENDAR_MCP_TOKEN_FILE": ""], argv: [],
-            readFile: { $0 == "/home/u/.config/apple-calendar/token" ? "deftoken" : nil },
-            homeDir: "/home/u")
-        XCTAssertEqual(c.token, "deftoken")
+        let c = config(env: ["CALENDAR_MCP_TOKEN_FILE": ""],
+                       files: ["/home/u/.config/apple-calendar/token": "deftoken"])
+        XCTAssertEqual(c.tokens, ["deftoken": "default"])
     }
     func testNoAuthWithTokenFilePresentIsOpen() {
-        // --no-auth must yield a genuinely open server: a leftover file token must NOT be read,
-        // or the printed "running without auth" warning would be a lie.
-        let c = ServerConfig.fromEnvironment(
-            [:], argv: ["--no-auth"],
-            readFile: { _ in "filetoken" }, homeDir: "/home/u")
-        XCTAssertNil(c.token)                 // file not consulted under --no-auth
-        XCTAssertNoThrow(try c.validate())    // allowed to start
+        // --no-auth must yield a genuinely open server: file tokens are NOT consulted.
+        let c = config(argv: ["--no-auth"],
+                       files: ["/home/u/.config/apple-calendar/token": "filetoken",
+                               "/home/u/.config/apple-calendar/tokens/brewserver": "brewtok"],
+                       dir: ["brewserver"])
+        XCTAssertTrue(c.tokens.isEmpty)
+        XCTAssertTrue(c.isOpen)
+        XCTAssertNoThrow(try c.validate())
     }
     func testNoAuthWithEnvTokenStillEnforced() {
-        // Back-compat: --no-auth + an explicit env token keeps that token (enforced), as before.
-        let c = ServerConfig.fromEnvironment(
-            ["CALENDAR_MCP_TOKEN": "envtoken"], argv: ["--no-auth"],
-            readFile: { _ in "filetoken" }, homeDir: "/home/u")
-        XCTAssertEqual(c.token, "envtoken")
+        let c = config(env: ["CALENDAR_MCP_TOKEN": "envtoken"], argv: ["--no-auth"])
+        XCTAssertEqual(c.tokens, ["envtoken": "env"])
+        XCTAssertFalse(c.isOpen)
     }
     func testEnvTokenIsNotTrimmed() {
-        // Exact legacy behavior: a whitespace-padded env token is used verbatim, not trimmed,
-        // so already-configured clients aren't silently locked out on upgrade.
-        let c = ServerConfig.fromEnvironment(
-            ["CALENDAR_MCP_TOKEN": " padded "], argv: [],
-            readFile: { _ in nil }, homeDir: "/home/u")
-        XCTAssertEqual(c.token, " padded ")
+        let c = config(env: ["CALENDAR_MCP_TOKEN": " padded "])
+        XCTAssertEqual(c.tokens, [" padded ": "env"])
     }
     func testArgvHostPortOverrideEnvAndBadPortFallsBack() {
-        let c = ServerConfig.fromEnvironment(
-            ["CALENDAR_MCP_HOST": "10.0.0.9", "CALENDAR_MCP_PORT": "9000"],
-            argv: ["--host", "127.0.0.5", "--port", "7777"],
-            readFile: { _ in nil }, homeDir: "/home/u")
-        XCTAssertEqual(c.host, "127.0.0.5")   // argv wins over env
+        let c = config(env: ["CALENDAR_MCP_HOST": "10.0.0.9", "CALENDAR_MCP_PORT": "9000"],
+                       argv: ["--host", "127.0.0.5", "--port", "7777"])
+        XCTAssertEqual(c.host, "127.0.0.5")
         XCTAssertEqual(c.port, 7777)
-        let bad = ServerConfig.fromEnvironment(
-            [:], argv: ["--port", "notanumber"], readFile: { _ in nil }, homeDir: "/home/u")
-        XCTAssertEqual(bad.port, 3456)        // non-numeric --port falls back to default, no crash
+        let bad = config(argv: ["--port", "notanumber"])
+        XCTAssertEqual(bad.port, 3456)
     }
 }
