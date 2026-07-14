@@ -12,11 +12,12 @@ let argv = Array(CommandLine.arguments.dropFirst())
 // (setup/status/uninstall/token via a user-owned LaunchAgent + token file).
 if argv.first == "serve" {
     let serveArgs = Array(argv.dropFirst())
-    // `serve token` prints the raw credential with NO trailing newline, so
-    // `ical serve token | pbcopy` copies the token exactly — a trailing "\n" would be
-    // pasted into the Bearer header and rejected. Other subcommands use emit's newline.
-    if serveArgs.first == "token" {
-        let r = Serve.token(home: NSHomeDirectory())
+    // `serve token` / `serve token show <name>` print the raw credential with NO trailing
+    // newline, so `| pbcopy` copies the token exactly — a trailing "\n" would be pasted into
+    // the Bearer header and rejected. All other token subcommands use emit's newline.
+    if serveArgs.first == "token",
+       serveArgs.count == 1 || serveArgs.dropFirst().first == "show" {
+        let r = Serve.tokenShow(Array(serveArgs.dropFirst()), home: NSHomeDirectory())
         if let out = r.0 { FileHandle.standardOutput.write(Data(out.utf8)) }
         if let err = r.1 { FileHandle.standardError.write(Data((err + "\n").utf8)) }
         exit(r.2)
@@ -37,6 +38,7 @@ if argv.first == "mcp" {
             FileHandle.standardError.write("""
             Refusing to start: no auth token found. Provide one via any of:
               • run `ical serve setup` (writes ~/.config/apple-calendar/token), or
+              • run `ical serve token add <client>` (writes ~/.config/apple-calendar/tokens/<client>), or
               • set CALENDAR_MCP_TOKEN, or
               • set CALENDAR_MCP_TOKEN_FILE to a file containing the token, or
               • create ~/.config/apple-calendar/token.

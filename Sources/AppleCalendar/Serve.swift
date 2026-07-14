@@ -282,14 +282,14 @@ extension Serve {
         case "status":    return status(home: home)
         case "connect":   return connect(rest, home: home)
         case "uninstall": return uninstall(rest, home: home)
-        case "token":     return token(home: home)
+        case "token":     return tokenSubcommand(rest, home: home)
         default:
             return (nil, """
             Usage: ical serve setup [--host IP | --tailscale | --local] [--port N] [--force]
                    ical serve status
                    ical serve connect <ssh-host> [--print]
                    ical serve uninstall [--purge]
-                   ical serve token
+                   ical serve token [show <client> | add <client> [--force] | revoke <client> | list]
             """, 1)
         }
     }
@@ -411,6 +411,8 @@ extension Serve {
         let token = ServerConfig.readTokenFile(tokPath)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let hasToken = (token?.isEmpty == false)
         out += "Token file: \(hasToken ? "present (\(tokPath))" : "missing")\n"
+        let clients = TokenStore.listTokenFiles(TokenStore.tokensDir(home: home))
+        out += "Client tokens: \(clients.isEmpty ? "none" : clients.joined(separator: ", "))\n"
         // Liveness probe against the *configured* address parsed back out of the plist.
         if let host = plistHost(plistFile: plistFile), let port = plistPort(plistFile: plistFile) {
             out += "Liveness (\(host):\(port)): \(livenessLine(host: host, port: port))\n"
@@ -443,10 +445,6 @@ extension Serve {
         guard let host = plistHost(plistFile: plistFile), let port = plistPort(plistFile: plistFile) else {
             return (nil, "Could not read the installed server config from \(plistFile). Run `ical serve setup --tailscale` first.", 1)
         }
-        guard let token = ServerConfig.readTokenFile(tokenPath(home: home))?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !token.isEmpty else {
-            return (nil, "No auth token found at \(tokenPath(home: home)). Run `ical serve setup --tailscale` first.", 1)
-        }
         // A loopback-only server is unreachable from any other host.
         if host == "127.0.0.1" {
             return (nil, "The server is bound to loopback (127.0.0.1) and is unreachable from another host. Rerun `ical serve setup --tailscale`.", 1)
@@ -457,6 +455,15 @@ extension Serve {
             return (nil, "Server is not up at \(host):\(port): \(liveness)\nStart it and check `ical serve status` before connecting a client.", 1)
         }
 
+        // Each remote host gets its OWN credential (minted on first connect, reused after),
+        // so one machine can later be revoked without re-onboarding the rest.
+        let clientName = TokenStore.clientName(forSSHHost: parsed.sshHost)
+        let token: String
+        switch ensureClientToken(name: clientName, home: home) {
+        case .success(let minted): token = minted.token
+        case .failure(let msg):    return (nil, msg, 1)
+        }
+
         let url = "http://\(host):\(port)/mcp"
         if parsed.printOnly {
             return (claudeMcpAddCommand(host: host, port: port, token: token), nil, 0)
@@ -464,13 +471,15 @@ extension Serve {
 
         let r = shell("/usr/bin/ssh", sshConnectArgs(sshHost: parsed.sshHost,
                                                      script: remoteConnectScript(host: host, port: port, token: token)))
-        return connectResultMessage(code: r.code, sshHost: parsed.sshHost, url: url, childOut: r.out, childErr: r.err)
+        return connectResultMessage(code: r.code, sshHost: parsed.sshHost, url: url,
+                                    childOut: r.out, childErr: r.err, clientName: clientName)
     }
 
     /// Map the ssh child's exit code to a user-facing result. Pure so each branch is unit-testable
     /// without spawning ssh. The exit codes come from `remoteConnectScript` (40/41) or ssh itself.
     static func connectResultMessage(code: Int32, sshHost: String, url: String,
-                                     childOut: String, childErr: String) -> (String?, String?, Int32) {
+                                     childOut: String, childErr: String,
+                                     clientName: String? = nil) -> (String?, String?, Int32) {
         let err = childErr.trimmingCharacters(in: .whitespacesAndNewlines)
         let out = childOut.trimmingCharacters(in: .whitespacesAndNewlines)
         let errTail = err.isEmpty ? "" : "\n\(err)"
@@ -479,6 +488,7 @@ extension Serve {
             var msg = "✓ Connected \(sshHost) to the apple-calendar MCP server at \(url).\n"
             msg += "  Registered user-scope for Claude Code on \(sshHost) (claude mcp add --scope user apple-calendar).\n"
             if !out.isEmpty { msg += "  Remote: \(out)\n" }
+            if let clientName { msg += "  Credential: per-client token '\(clientName)' (revoke with `ical serve token revoke \(clientName)`).\n" }
             return (msg, nil, 0)
         case 40:
             return (nil, "The claude CLI was not found on \(sshHost). Install Claude Code there, then rerun." + errTail, 40)
@@ -529,9 +539,9 @@ extension Serve {
                 do { try fm.removeItem(atPath: dir) }
                 catch { problems.append("could not delete \(dir): \(error.localizedDescription) — the token may still be usable; remove it manually") }
             }
-            if problems.isEmpty { out += "  Purged \(dir) (token deleted).\n" }
+            if problems.isEmpty { out += "  Purged \(dir) (all tokens deleted).\n" }
         } else {
-            out += "  Token kept at \(tokenPath(home: home)) (use --purge to delete it too).\n"
+            out += "  Tokens kept in \(configDir(home: home)) (use --purge to delete them too).\n"
         }
         if problems.isEmpty { return (out, nil, 0) }
         return (out, "uninstall incomplete:\n  - " + problems.joined(separator: "\n  - "), 1)
@@ -543,5 +553,181 @@ extension Serve {
             return (nil, "No token yet. Run `ical serve setup` first.", 1)
         }
         return (t, nil, 0)   // pipe to pbcopy: `ical serve token | pbcopy`
+    }
+}
+
+// A plain error string is enough for `ensureClientToken`'s failure channel — the caller
+// surfaces it verbatim to the user, so no structured error type is warranted.
+extension String: @retroactive Error {}
+
+// MARK: - Token management
+extension Serve {
+    enum TokenCmd: Equatable {
+        case printDefault
+        case show(String)
+        case add(name: String, force: Bool)
+        case revoke(String)
+        case list
+    }
+    enum TokenParseError: Error, Equatable {
+        case unknownSub(String), missingName(String), invalidName(String), unexpectedArg(String)
+    }
+
+    /// Parse everything after `serve token`. "default" is refused as a client name in add/
+    /// revoke/show — the legacy token is managed by `setup` / `uninstall --purge`, and letting
+    /// `revoke default` half-disable the installed server would be a footgun.
+    static func parseTokenArgs(_ args: [String]) -> Result<TokenCmd, TokenParseError> {
+        guard let sub = args.first else { return .success(.printDefault) }
+        let rest = Array(args.dropFirst())
+        func name(_ verb: String) -> Result<String, TokenParseError> {
+            guard let n = rest.first(where: { !$0.hasPrefix("--") }) else { return .failure(.missingName(verb)) }
+            guard TokenStore.isValidClientName(n), n != "default" else { return .failure(.invalidName(n)) }
+            return .success(n)
+        }
+        switch sub {
+        case "show":   return name("show").map { .show($0) }
+        case "add":
+            if let extra = rest.first(where: { $0.hasPrefix("--") && $0 != "--force" }) {
+                return .failure(.unexpectedArg(extra))
+            }
+            return name("add").map { .add(name: $0, force: rest.contains("--force")) }
+        case "revoke": return name("revoke").map { .revoke($0) }
+        case "list":
+            guard rest.isEmpty else { return .failure(.unexpectedArg(rest[0])) }
+            return .success(.list)
+        default:       return .failure(.unknownSub(sub))
+        }
+    }
+
+    /// Reuse an existing non-empty tokens/<name> file, else mint one (dir 0700, file 0600).
+    static func ensureClientToken(name: String, home: String) -> Result<(token: String, created: Bool), String> {
+        let dir = TokenStore.tokensDir(home: home)
+        let path = "\(dir)/\(name)"
+        if let existing = ServerConfig.readTokenFile(path)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !existing.isEmpty {
+            return .success((existing, false))
+        }
+        let fm = FileManager.default
+        do {
+            try fm.createDirectory(atPath: dir, withIntermediateDirectories: true,
+                                   attributes: [.posixPermissions: 0o700])
+            let tok = generateToken()
+            try tok.write(toFile: path, atomically: true, encoding: .utf8)
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+            return .success((tok, true))
+        } catch {
+            return .failure("Could not write token to \(path): \(error.localizedDescription)")
+        }
+    }
+
+    static func tokenListOutput(clients: [(name: String, token: String)], hasDefault: Bool) -> String {
+        var rows: [(String, String)] = hasDefault ? [("default", "(managed by `ical serve setup`)")] : []
+        rows += clients.map { ($0.name, TokenStore.fingerprint($0.token)) }
+        guard !rows.isEmpty else {
+            return "No tokens. Run `ical serve setup` or `ical serve token add <client>`."
+        }
+        let width = rows.map { $0.0.count }.max() ?? 0
+        return rows.map { name, detail in
+            name.padding(toLength: max(width, name.count), withPad: " ", startingAt: 0) + "  " + detail
+        }.joined(separator: "\n")
+    }
+
+    /// `serve token add|revoke|list` (the raw-output `show`/bare cases route via tokenShow).
+    static func tokenSubcommand(_ args: [String], home: String) -> (String?, String?, Int32) {
+        let usage = """
+        Usage: ical serve token                      # print the default token (raw)
+               ical serve token show <client>        # print one client's token (raw)
+               ical serve token add <client> [--force]
+               ical serve token revoke <client>
+               ical serve token list
+        """
+        let cmd: TokenCmd
+        switch parseTokenArgs(args) {
+        case .success(let c): cmd = c
+        case .failure(.unknownSub(let s)):   return (nil, "Unknown token subcommand '\(s)'.\n\(usage)", 1)
+        case .failure(.missingName(let v)):  return (nil, "token \(v) requires a client name.\n\(usage)", 1)
+        case .failure(.invalidName(let n)):  return (nil, "Invalid client name '\(n)' (letters/digits/._- , must start alphanumeric, max 64; 'default' is reserved).", 1)
+        case .failure(.unexpectedArg(let a)): return (nil, "Unexpected argument '\(a)'.\n\(usage)", 1)
+        }
+        let fm = FileManager.default
+        switch cmd {
+        case .printDefault, .show:
+            // main.swift routes these through tokenShow for raw output; reaching here means
+            // the routing broke — fail loudly rather than print a token with a newline.
+            return (nil, "internal error: raw token output must route via tokenShow", 1)
+        case .add(let name, let force):
+            let path = "\(TokenStore.tokensDir(home: home))/\(name)"
+            if !force, let existing = ServerConfig.readTokenFile(path)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !existing.isEmpty {
+                return (nil, "Client '\(name)' already has a token. Use `ical serve token show \(name)` to print it, or --force to replace it (the old token stops working within seconds).", 1)
+            }
+            if force, fm.fileExists(atPath: path) {
+                do { try fm.removeItem(atPath: path) } catch {
+                    // Rotation is security-critical: if the old token can't be removed,
+                    // ensureClientToken would reuse it and report success — never do that.
+                    return (nil, "Could not remove old token at \(path): \(error.localizedDescription) — the old token may still be usable; remove it manually and retry.", 1)
+                }
+            }
+            switch ensureClientToken(name: name, home: home) {
+            case .failure(let msg): return (nil, msg, 1)
+            case .success(let minted):
+                var out = "✓ \(minted.created ? "Created" : "Reusing") token for client '\(name)'.\n"
+                out += "  Token file: \(path)\n"
+                out += "  A running server picks it up within ~5s (no restart needed).\n"
+                out += "\nToken:\n\(minted.token)\n"
+                // Only render connect instructions when the server is actually installed.
+                let plistFile = plistPath(home: home)
+                if let host = plistHost(plistFile: plistFile), let port = plistPort(plistFile: plistFile) {
+                    out += "\nClient config (paste on \(name)):\n\n\(clientConfigJSON(host: host, port: port, token: minted.token))\n"
+                    out += "\nOr with Claude Code:\n\n\(claudeMcpAddCommand(host: host, port: port, token: minted.token))\n"
+                } else {
+                    out += "\nRun `ical serve setup --tailscale` to install the server, then `ical serve connect \(name)`.\n"
+                }
+                return (out, nil, 0)
+            }
+        case .revoke(let name):
+            let path = "\(TokenStore.tokensDir(home: home))/\(name)"
+            guard fm.fileExists(atPath: path) else {
+                return (nil, "No token for client '\(name)' (\(path) does not exist).", 1)
+            }
+            do { try fm.removeItem(atPath: path) } catch {
+                // Revocation is the security-critical path: if the delete failed the
+                // credential may still authorize — never report success.
+                return (nil, "Could not delete \(path): \(error.localizedDescription) — the token may still be usable; remove it manually.", 1)
+            }
+            return ("✓ Revoked client '\(name)'. A running server rejects it within ~5s.", nil, 0)
+        case .list:
+            let dir = TokenStore.tokensDir(home: home)
+            let clients: [(String, String)] = TokenStore.listTokenFiles(dir).compactMap { name in
+                guard let t = ServerConfig.readTokenFile("\(dir)/\(name)")?
+                    .trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
+                return (name, t)
+            }
+            let hasDefault = (ServerConfig.readTokenFile(tokenPath(home: home))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)).map { !$0.isEmpty } ?? false
+            return (tokenListOutput(clients: clients, hasDefault: hasDefault), nil, 0)
+        }
+    }
+
+    /// Raw token output for `serve token` (default) and `serve token show <name>`:
+    /// stdout is EXACTLY the token, no trailing newline, so `| pbcopy` copies it verbatim.
+    static func tokenShow(_ args: [String], home: String) -> (String?, String?, Int32) {
+        switch parseTokenArgs(args) {
+        case .success(.printDefault):
+            return token(home: home)                    // existing legacy implementation
+        case .success(.show(let name)):
+            let path = "\(TokenStore.tokensDir(home: home))/\(name)"
+            guard let t = ServerConfig.readTokenFile(path)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !t.isEmpty else {
+                return (nil, "No token for client '\(name)'. Create it with `ical serve token add \(name)`.", 1)
+            }
+            return (t, nil, 0)
+        case .success:
+            return (nil, "internal error: non-raw token subcommand routed to tokenShow", 1)
+        case .failure(.invalidName(let n)):
+            return (nil, "Invalid client name '\(n)'.", 1)
+        case .failure:
+            return (nil, "Usage: ical serve token [show <client>]", 1)
+        }
     }
 }

@@ -297,4 +297,105 @@ final class ServeTests: XCTestCase {
         XCTAssertTrue(xml.contains("/h/Logs/a&lt;b.log"))
         XCTAssertFalse(xml.contains("/opt/R&D/ical"))   // raw ampersand must not survive
     }
+
+    // MARK: - serve token parsing
+    func testTokenParseBareIsPrintDefault() {
+        XCTAssertEqual(Serve.parseTokenArgs([]), .success(.printDefault))
+    }
+    func testTokenParseSubcommands() {
+        XCTAssertEqual(Serve.parseTokenArgs(["show", "brewserver"]), .success(.show("brewserver")))
+        XCTAssertEqual(Serve.parseTokenArgs(["add", "brewserver"]), .success(.add(name: "brewserver", force: false)))
+        XCTAssertEqual(Serve.parseTokenArgs(["add", "brewserver", "--force"]), .success(.add(name: "brewserver", force: true)))
+        XCTAssertEqual(Serve.parseTokenArgs(["revoke", "brewserver"]), .success(.revoke("brewserver")))
+        XCTAssertEqual(Serve.parseTokenArgs(["list"]), .success(.list))
+    }
+    func testTokenParseErrors() {
+        XCTAssertEqual(Serve.parseTokenArgs(["frobnicate"]), .failure(.unknownSub("frobnicate")))
+        XCTAssertEqual(Serve.parseTokenArgs(["add"]), .failure(.missingName("add")))
+        XCTAssertEqual(Serve.parseTokenArgs(["revoke"]), .failure(.missingName("revoke")))
+        XCTAssertEqual(Serve.parseTokenArgs(["show"]), .failure(.missingName("show")))
+        XCTAssertEqual(Serve.parseTokenArgs(["add", "../evil"]), .failure(.invalidName("../evil")))
+        XCTAssertEqual(Serve.parseTokenArgs(["add", "default"]), .failure(.invalidName("default")))
+        XCTAssertEqual(Serve.parseTokenArgs(["list", "extra"]), .failure(.unexpectedArg("extra")))
+        XCTAssertEqual(Serve.parseTokenArgs(["revoke", "default"]), .failure(.invalidName("default")))
+    }
+
+    // MARK: - serve token behaviors (temp home)
+    private func makeTempHome() throws -> String {
+        let dir = NSTemporaryDirectory() + "serve-token-tests-" + UUID().uuidString
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(atPath: dir) }
+        return dir
+    }
+    func testEnsureClientTokenMintsThenReuses() throws {
+        let home = try makeTempHome()
+        guard case .success(let first) = Serve.ensureClientToken(name: "brewserver", home: home) else {
+            return XCTFail("mint failed")
+        }
+        XCTAssertTrue(first.created)
+        XCTAssertEqual(first.token.count, 64)                       // 32 random bytes, hex
+        // File exists with 0600 and the dir with 0700.
+        let path = TokenStore.tokensDir(home: home) + "/brewserver"
+        let attrs = try FileManager.default.attributesOfItem(atPath: path)
+        XCTAssertEqual((attrs[.posixPermissions] as? NSNumber)?.int16Value, 0o600)
+        guard case .success(let second) = Serve.ensureClientToken(name: "brewserver", home: home) else {
+            return XCTFail("reuse failed")
+        }
+        XCTAssertFalse(second.created)
+        XCTAssertEqual(second.token, first.token)
+    }
+    func testTokenAddRefusesExistingWithoutForce() throws {
+        let home = try makeTempHome()
+        _ = Serve.tokenSubcommand(["add", "brewserver"], home: home)
+        let r = Serve.tokenSubcommand(["add", "brewserver"], home: home)
+        XCTAssertEqual(r.2, 1)
+        XCTAssertTrue(r.1?.contains("--force") == true)
+        let forced = Serve.tokenSubcommand(["add", "brewserver", "--force"], home: home)
+        XCTAssertEqual(forced.2, 0)
+    }
+    func testTokenAddForceMintsDifferentTokenAndForceOnFreshName() throws {
+        let home = try makeTempHome()
+        _ = Serve.tokenSubcommand(["add", "brewserver"], home: home)
+        guard let before = Serve.tokenShow(["show", "brewserver"], home: home).0 else {
+            return XCTFail("could not read original token")
+        }
+        // --force on an existing token succeeds and rotates to a different value.
+        let forced = Serve.tokenSubcommand(["add", "brewserver", "--force"], home: home)
+        XCTAssertEqual(forced.2, 0)
+        guard let after = Serve.tokenShow(["show", "brewserver"], home: home).0 else {
+            return XCTFail("could not read rotated token")
+        }
+        XCTAssertEqual(after.count, 64)
+        XCTAssertNotEqual(after, before)                            // rotated, not reused
+        XCTAssertTrue(forced.0?.contains("Created") == true)        // not "Reusing"
+        // --force on a name that has no token yet just mints (no error).
+        let fresh = Serve.tokenSubcommand(["add", "micro-server", "--force"], home: home)
+        XCTAssertEqual(fresh.2, 0)
+    }
+    func testTokenRevokeDeletesAndRevokeMissingErrors() throws {
+        let home = try makeTempHome()
+        _ = Serve.tokenSubcommand(["add", "brewserver"], home: home)
+        let r = Serve.tokenSubcommand(["revoke", "brewserver"], home: home)
+        XCTAssertEqual(r.2, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: TokenStore.tokensDir(home: home) + "/brewserver"))
+        let missing = Serve.tokenSubcommand(["revoke", "brewserver"], home: home)
+        XCTAssertEqual(missing.2, 1)
+    }
+    func testTokenShowRawAndUnknown() throws {
+        let home = try makeTempHome()
+        _ = Serve.tokenSubcommand(["add", "brewserver"], home: home)
+        let r = Serve.tokenShow(["show", "brewserver"], home: home)
+        XCTAssertEqual(r.2, 0)
+        XCTAssertEqual(r.0?.count, 64)                              // raw token, no newline
+        XCTAssertFalse(r.0?.hasSuffix("\n") ?? true)
+        XCTAssertEqual(Serve.tokenShow(["show", "nope"], home: home).2, 1)
+    }
+    func testTokenListOutput() {
+        let out = Serve.tokenListOutput(
+            clients: [("brewserver", "tok-a"), ("micro-server", "tok-b")], hasDefault: true)
+        XCTAssertTrue(out.contains("default"))
+        XCTAssertTrue(out.contains("brewserver"))
+        XCTAssertTrue(out.contains(TokenStore.fingerprint("tok-a")))
+        XCTAssertFalse(out.contains("tok-a"))                       // never print raw tokens
+    }
 }
