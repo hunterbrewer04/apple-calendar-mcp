@@ -346,7 +346,7 @@ interface address (for example `10.0.0.1`).
 server some other way.
 
 <details>
-<summary>Run the HTTP server manually (env token + Homebrew service)</summary>
+<summary>Run the HTTP server manually (env token)</summary>
 
 Start it by hand to try it out:
 
@@ -355,14 +355,8 @@ export CALENDAR_MCP_TOKEN="$(openssl rand -hex 16)"   # generate a token
 ical mcp --http                                       # listens on 127.0.0.1:3456
 ```
 
-To keep it running across logins with Homebrew's service manager, put the token in the service
-environment first:
-
-```bash
-launchctl setenv CALENDAR_MCP_TOKEN "$(openssl rand -hex 16)"
-launchctl setenv CALENDAR_MCP_HOST "100.x.y.z"        # optional: bind to a private/VPN address
-brew services start apple-calendar
-```
+Add `--host <ip>` / `--port <n>` (or the env vars from the
+[configuration reference](#configuration-reference)) to bind elsewhere.
 
 Check it's up (a request **without** the token should be rejected with `401`):
 
@@ -371,10 +365,10 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:3456/mcp \
   -H 'Accept: application/json, text/event-stream' -d '{}'      # → 401
 ```
 
-> ⚠️ `brew services` and `brew upgrade` **regenerate the service plist**, which wipes the
-> `launchctl setenv` token and host out of its environment — after the next upgrade the
-> fail-closed server won't come back up. That's exactly why `ical serve setup` uses a token
-> *file* plus a user-owned LaunchAgent instead; it's the supported path.
+> ⚠️ There is deliberately **no `brew services` integration**: a brew-managed service plist is
+> regenerated on upgrade, which would wipe any environment injected with `launchctl setenv` and
+> leave the fail-closed server down. For anything persistent, use `ical serve setup` — its token
+> *file* plus user-owned LaunchAgent survive reboots and `brew upgrade`; it's the supported path.
 
 </details>
 
@@ -393,7 +387,8 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:3456/mcp \
 All token sources are a **union** — the env token, the default file, and every named client file
 in `tokens/` are valid at once; any of them authorizes a request.
 
-The same three can be passed on the command line: `--host`, `--port`, and `--no-auth`.
+On the command line: `--host`, `--port`, and `--no-auth` (run without a token — see the
+security model below).
 
 ---
 
