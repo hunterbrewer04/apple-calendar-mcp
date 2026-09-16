@@ -22,5 +22,13 @@ jobs:
       # macOS Calendar (TCC) access, so there are no live EventKit reads here. These
       # suites also can't run on a Command Line Tools-only box (no XCTest); the Xcode
       # selected above provides it.
-      - name: Test
+      - name: Test (debug)
         run: swift test
+      # The HTTP transport once aborted in release builds only (a Swift-runtime
+      # `swift_task_dealloc` fatal error out of a background task) while the debug
+      # suite stayed green for two months. Run the suite at the optimization level
+      # users actually get so that class of bug has somewhere to show up. Costs about
+      # as much as the release build above: `swift test` adds `-enable-testing` to
+      # every module, so the classic build backend recompiles the dependency graph.
+      - name: Test (release)
+        run: swift test -c release

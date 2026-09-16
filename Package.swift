@@ -28,6 +28,8 @@ let package = Package(
             dependencies: [
                 "apple-calendar",
                 .product(name: "MCP", package: "swift-sdk"),
+                // HTTPTransportStressTests reads the bound port off the NIO Channel.
+                .product(name: "NIOCore", package: "swift-nio"),
             ],
             path: "Tests/AppleCalendarTests"
         ),
