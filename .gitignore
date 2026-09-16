@@ -20,3 +20,6 @@ scripts/migrate.sh
 
 # Homebrew formula lives in the separate `homebrew-tap` repo; staged here for review only.
 homebrew-tap/
+
+# Local code-graph output from graphify; regenerable, not shipped.
+graphify-out/

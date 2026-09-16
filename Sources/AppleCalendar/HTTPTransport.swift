@@ -6,18 +6,6 @@ import NIOCore
 
 enum HTTPRunner {
     static func run(store: CalendarStore, config: ServerConfig) async throws {
-        // Build a custom validation pipeline that disables origin validation so
-        // remote tailnet clients (whose Host header is not localhost) are accepted.
-        // The same (stateless) pipeline config is reused for every per-session
-        // transport.
-        let pipeline = StandardValidationPipeline(validators: [
-            OriginValidator.disabled,
-            AcceptHeaderValidator(mode: .sseRequired),
-            ContentTypeValidator(),
-            ProtocolVersionValidator(),
-            SessionValidator(),
-        ])
-
         // One MCP Server + transport *per session*, not one shared instance.
         //
         // The SDK's StatefulHTTPServerTransport (and the Server it drives) are
@@ -28,10 +16,22 @@ enum HTTPRunner {
         // surfacing as "Session already initialized" on every later connect. This
         // manager mirrors the SDK's reference `HTTPApp`: each `initialize` mints a
         // fresh session, later requests route by `MCP-Session-Id`, and sessions are
-        // torn down on `DELETE` or idle timeout.
-        let sessions = SessionManager(store: store, validationPipeline: pipeline)
-        await sessions.startReaper()
+        // torn down on `DELETE` or evicted least-recently-used once the table is full.
+        let app = makeApplication(config: config, sessions: SessionManager(store: store))
+        try await app.runService()
+    }
 
+    /// Builds the HTTP application without running it.
+    ///
+    /// `run` blocks forever inside `runService`, which is what production wants but
+    /// leaves nothing for a test to hold on to. Tests call this with `config.port == 0`,
+    /// read the bound port back from `onServerRunning`, drive real HTTP against it, and
+    /// stop the server by cancelling the task that awaits `app.run()`.
+    static func makeApplication(
+        config: ServerConfig,
+        sessions: SessionManager,
+        onServerRunning: @escaping @Sendable (any Channel) async -> Void = { _ in }
+    ) -> some ApplicationProtocol {
         // Live token view: `serve token add`/`revoke` on this Mac take effect within the
         // TTL without restarting the server (which would drop every client's session).
         // Under --no-auth files are never consulted, so the cache serves the startup
@@ -91,13 +91,13 @@ enum HTTPRunner {
         router.get("/mcp", use: mcpHandler)
         router.on("/mcp", method: .delete, use: mcpHandler)
 
-        let app = Application(
+        return Application(
             router: router,
             configuration: ApplicationConfiguration(
                 address: .hostname(config.host, port: config.port)
-            )
+            ),
+            onServerRunning: onServerRunning
         )
-        try await app.runService()
     }
 
     // MARK: - Response conversion
@@ -151,32 +151,67 @@ enum HTTPRunner {
 /// different clients (and reconnects) hit over time must create a fresh
 /// server/transport per `initialize` and route subsequent requests by their
 /// `MCP-Session-Id` — exactly what the SDK's reference `HTTPApp` does.
+///
+/// Unlike the reference `HTTPApp`, there is deliberately NO background reaper task.
+/// The reference's 60 s `Task.sleep` cleanup loop aborted this process on its first
+/// wake under reconnect churn (`swift_task_dealloc` "freed pointer was not the last
+/// allocation" out of the reaper closure; reproduced 2026-09-16 at 57 sessions / 58 s)
+/// in release builds from the Swift 6.2 toolchain, and launchd's KeepAlive hid the
+/// once-a-minute crash loop for two months. The same source built with Swift 6.4 ran
+/// the same churn without aborting, which points at the older toolchain's codegen
+/// rather than this code — but the formula builds from source with whatever toolchain
+/// the host has, so the pattern is removed rather than relied on. The table is
+/// bounded inline instead: when an `initialize` would push it past `maxSessions`, the
+/// least-recently-used sessions are closed on the request path. Abandoned sessions
+/// (clients that reconnect without a `DELETE`) are exactly the ones that go stale, so
+/// LRU is the right victim order.
 actor SessionManager {
+    /// Default cap on live sessions. Each client holds one session, so a handful of
+    /// machines sit far below this; it only bites under reconnect churn, where it
+    /// replaces what the idle reaper was meant to do.
+    static let defaultMaxSessions = 256
+
     private struct Session {
         let server: Server
         let transport: StatefulHTTPServerTransport
-        var lastAccessed: Date
+        /// Which credential opened the session; carried so eviction lines attribute too.
+        let client: String
+        /// Monotonic access ordinal, not a wall-clock time, so LRU order is exact and
+        /// immune to clock adjustments.
+        var lastAccessed: UInt64
     }
 
     private let store: CalendarStore
     private let validationPipeline: any HTTPRequestValidationPipeline
-    /// Idle sessions older than this are reaped. Mirrors the SDK default (1h).
-    private let idleTimeout: TimeInterval
+    private let maxSessions: Int
     private var sessions: [String: Session] = [:]
-    private var reaperStarted = false
+    private var accessCounter: UInt64 = 0
 
-    init(store: CalendarStore, validationPipeline: any HTTPRequestValidationPipeline, idleTimeout: TimeInterval = 3600) {
+    init(store: CalendarStore, maxSessions: Int = SessionManager.defaultMaxSessions) {
+        precondition(maxSessions > 0, "maxSessions must allow at least one live session")
         self.store = store
-        self.validationPipeline = validationPipeline
-        self.idleTimeout = idleTimeout
+        self.maxSessions = maxSessions
+        // Origin validation is disabled so remote tailnet clients (whose Host header
+        // is not localhost) are accepted. The same (stateless) pipeline is shared by
+        // every per-session transport.
+        self.validationPipeline = StandardValidationPipeline(validators: [
+            OriginValidator.disabled,
+            AcceptHeaderValidator(mode: .sseRequired),
+            ContentTypeValidator(),
+            ProtocolVersionValidator(),
+            SessionValidator(),
+        ])
     }
+
+    /// Number of live sessions. Exposed for tests asserting the cap holds.
+    var count: Int { sessions.count }
 
     func handle(_ request: MCP.HTTPRequest, client: String) async -> MCP.HTTPResponse {
         let sessionID = request.header(HTTPHeaderName.sessionID)
 
         // Route to an existing session.
         if let sessionID, var session = sessions[sessionID] {
-            session.lastAccessed = Date()
+            session.lastAccessed = nextAccess()
             sessions[sessionID] = session
 
             let response = await session.transport.handleRequest(request)
@@ -215,7 +250,10 @@ actor SessionManager {
             return .error(statusCode: 500, .internalError("Failed to start session: \(error.localizedDescription)"))
         }
 
-        sessions[sessionID] = Session(server: server, transport: transport, lastAccessed: Date())
+        // Make room first, then insert in the same actor turn, so the table never
+        // holds more than `maxSessions` entries and the new session is never a victim.
+        await evictLeastRecentlyUsed(downTo: maxSessions - 1)
+        sessions[sessionID] = Session(server: server, transport: transport, client: client, lastAccessed: nextAccess())
         // One line per session (not per request) into the LaunchAgent log, so `ical serve`
         // deployments can tell WHICH machine's credential opened each session.
         FileHandle.standardError.write(Data("session \(sessionID) client=\(client)\n".utf8))
@@ -226,6 +264,23 @@ actor SessionManager {
             await closeSession(sessionID)
         }
         return response
+    }
+
+    private func nextAccess() -> UInt64 {
+        accessCounter &+= 1
+        return accessCounter
+    }
+
+    /// Closes least-recently-used sessions until at most `limit` remain. Re-reads the
+    /// live count after every await: `closeSession` suspends on the transport, and
+    /// another `initialize` may have run its own eviction in the meantime.
+    private func evictLeastRecentlyUsed(downTo limit: Int) async {
+        while sessions.count > limit,
+              let victim = sessions.min(by: { $0.value.lastAccessed < $1.value.lastAccessed }) {
+            FileHandle.standardError.write(
+                Data("session \(victim.key) client=\(victim.value.client) evicted (cap \(maxSessions))\n".utf8))
+            await closeSession(victim.key)
+        }
     }
 
     private func closeSession(_ sessionID: String) async {
@@ -242,30 +297,6 @@ actor SessionManager {
             let method = dict["method"] as? String
         else { return false }
         return method == "initialize"
-    }
-
-    // MARK: - Idle-session reaper
-
-    /// Starts the background sweep that closes sessions clients abandoned without
-    /// a `DELETE`. Idempotent.
-    func startReaper() {
-        guard !reaperStarted else { return }
-        reaperStarted = true
-        Task { [weak self] in
-            while true {
-                try? await Task.sleep(for: .seconds(60))
-                guard let self else { return }
-                await self.reapIdleSessions()
-            }
-        }
-    }
-
-    private func reapIdleSessions() async {
-        let now = Date()
-        let stale = sessions.filter { now.timeIntervalSince($0.value.lastAccessed) > idleTimeout }
-        for (sessionID, _) in stale {
-            await closeSession(sessionID)
-        }
     }
 }
 
