@@ -56,6 +56,10 @@ enum Serve {
     static func plistXML(binaryPath: String, host: String, port: Int, logPath: String) -> String {
         let args = [binaryPath, "mcp", "--http", "--host", host, "--port", String(port)]
         let argXML = args.map { "        <string>\(xmlEscape($0))</string>" }.joined(separator: "\n")
+        // ExitTimeOut: the backstop behind HTTPRunner's session drain. On SIGTERM the server
+        // closes every session and exits at once; if that ever stalls, launchd SIGKILLs here
+        // (the drain's own 3 s cancellation backstop sits inside it). Pinned because the
+        // default is system-defined: macOS 26 already applies 5 s, older releases documented 20.
         return """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -71,6 +75,8 @@ enum Serve {
             <true/>
             <key>KeepAlive</key>
             <true/>
+            <key>ExitTimeOut</key>
+            <integer>5</integer>
             <key>StandardOutPath</key>
             <string>\(xmlEscape(logPath))</string>
             <key>StandardErrorPath</key>
@@ -273,6 +279,17 @@ extension Serve {
     /// True iff a `livenessLine` reports the server is actually responding.
     static func isUp(_ line: String) -> Bool { line.hasPrefix("up") }
 
+    /// The `pid`, `runs`, and `last exit reason` lines out of `launchctl print`, trimmed, in
+    /// that order, skipping any that are absent (`last exit reason` only appears after an exit).
+    static func launchctlSummary(_ printOutput: String) -> [String] {
+        let lines = trimmedLines(printOutput)
+        return ["pid = ", "runs = ", "last exit reason = "].compactMap { key in lines.first { $0.hasPrefix(key) } }
+    }
+
+    private static func trimmedLines(_ s: String) -> [String] {
+        s.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
     static func run(_ argv: [String]) -> (stdout: String?, stderr: String?, exitCode: Int32) {
         let home = NSHomeDirectory()
         let sub = argv.first ?? ""
@@ -404,8 +421,10 @@ extension Serve {
         let loaded = printOut.code == 0
         var out = "LaunchAgent: \(installed ? "installed (\(plistFile))" : "not installed")\n"
         out += "Loaded: \(loaded ? "yes" : "no")\n"
-        if loaded, let pidLine = printOut.out.split(separator: "\n").first(where: { $0.contains("pid = ") }) {
-            out += "  \(pidLine.trimmingCharacters(in: .whitespaces))\n"
+        // `runs` and `last exit reason` are how a KeepAlive crash loop shows up: launchd keeps
+        // respawning the job, so the liveness probe below still says "up" between restarts.
+        if loaded {
+            for line in launchctlSummary(printOut.out) { out += "  \(line)\n" }
         }
         let tokPath = tokenPath(home: home)
         let token = ServerConfig.readTokenFile(tokPath)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -413,6 +432,10 @@ extension Serve {
         out += "Token file: \(hasToken ? "present (\(tokPath))" : "missing")\n"
         let clients = TokenStore.listTokenFiles(TokenStore.tokensDir(home: home))
         out += "Client tokens: \(clients.isEmpty ? "none" : clients.joined(separator: ", "))\n"
+        // Nothing rotates the log; a size out of step with `runs` is the other crash-loop tell.
+        let logFile = logPath(home: home)
+        let logSize = ((try? FileManager.default.attributesOfItem(atPath: logFile))?[.size] as? NSNumber)?.int64Value
+        out += "Log: \(logFile) (\(logSize.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "missing"))\n"
         // Liveness probe against the *configured* address parsed back out of the plist.
         if let host = plistHost(plistFile: plistFile), let port = plistPort(plistFile: plistFile) {
             out += "Liveness (\(host):\(port)): \(livenessLine(host: host, port: port))\n"
@@ -510,7 +533,7 @@ extension Serve {
     static func plistPort(plistFile: String) -> Int? { plistArgAfter("--port", plistFile: plistFile).flatMap(Int.init) }
     private static func plistArgAfter(_ flag: String, plistFile: String) -> String? {
         guard let xml = try? String(contentsOfFile: plistFile, encoding: .utf8) else { return nil }
-        let lines = xml.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        let lines = trimmedLines(xml)
         let needle = "<string>\(flag)</string>"
         guard let i = lines.firstIndex(of: needle), i + 1 < lines.count else { return nil }
         let next = lines[i + 1]

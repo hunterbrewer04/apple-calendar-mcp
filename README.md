@@ -108,6 +108,7 @@ That's it. Ask your assistant what's on your calendar.
 | `ical calendars` | the names of all your calendars |
 | `ical detail week` | `today`, `tomorrow`, `week`, `month`, or `next N`, with notes, URLs, and event ids |
 | `ical debug today` | same periods, raw pipe-delimited output for scripts |
+| `ical version` | the installed version |
 
 Add `-x` (or `--detail`) to any read command to include notes, URLs, and the event id that
 `edit` and `rm` need (for a single calendar: `ical cal "Work" 14 -x`). `ical detail <period>` is
@@ -325,7 +326,7 @@ curl -s -X POST http://YOUR-MAC-IP:3456/mcp \
 
 | Command | Does |
 |---|---|
-| `ical serve status` | LaunchAgent state, liveness (`401` = up and locked), known clients, and the client config |
+| `ical serve status` | LaunchAgent state (pid, run count, last exit reason), log size, liveness (`401` = up and locked), known clients, and the client config |
 | `ical serve token list` | every client with a `sha256:` fingerprint (never prints raw tokens) |
 | `ical serve token show <client>` | print one client's token, no trailing newline (`\| pbcopy` friendly) |
 | `ical serve token add <client> [--force]` | mint a token for a named client; `--force` rotates an existing one |
@@ -375,6 +376,7 @@ persistent path.
 | `ical serve status` shows down after `brew upgrade` | The upgrade removed the old binary under the running server and it doesn't always come back on its own. `launchctl kickstart -k gui/$(id -u)/com.apple-calendar-mcp`, or re-run `ical serve setup --tailscale`. |
 | `The server is bound to loopback` | Setup ran without `--tailscale` or `--host`. Re-run with one. |
 | `Refusing to start: no auth token found` | You ran `ical mcp --http` by hand with no token. Run `ical serve setup`, or set `CALENDAR_MCP_TOKEN`. |
+| Restarts take ~5 s and `ical serve status` shows a kill under `last exit reason` | That is a server older than 1.4.3, which waited on abandoned client streams until launchd force-stopped it. 1.4.3 closes every session on SIGTERM and exits at once; the 5 s `ExitTimeOut` in the LaunchAgent is only a backstop now. An install from before it picks the setting up on the next `ical serve setup --tailscale`. |
 
 ### Connecting clients
 
@@ -403,6 +405,7 @@ persistent path.
 | Client tokens | | | `~/.config/apple-calendar/tokens/<client>` |
 | Bind address | `CALENDAR_MCP_HOST` | `--host` | `127.0.0.1` |
 | Port | `CALENDAR_MCP_PORT` | `--port` | `3456` |
+| Max sessions | `CALENDAR_MCP_MAX_SESSIONS` | `--max-sessions` | `256` |
 | Disable auth | | `--no-auth` | off |
 
 All token sources are unioned: the env token, the default token file, and every file in
@@ -413,6 +416,9 @@ and `token revoke` never need a restart.
 `--no-auth` only consults `CALENDAR_MCP_TOKEN`; if that is set, auth stays on. With nothing
 set, anyone who can reach the port can read and change your calendar. Use it only on an
 isolated interface.
+
+Sessions past the cap are evicted least-recently-used; each client holds one session, so
+normal use never gets near it.
 
 ## Security model
 

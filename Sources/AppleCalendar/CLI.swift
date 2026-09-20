@@ -18,6 +18,7 @@ enum Command: Equatable {
     case events(offsetDays: Int, days: Int, calendarName: String?)
     case raw(offsetDays: Int, days: Int)
     case write(WriteArgs)
+    case version
     case usage
 }
 
@@ -68,6 +69,8 @@ enum CLI {
         case "debug":
             let s = sub(rest.first ?? "today")
             return (.raw(offsetDays: s.offsetDays, days: s.days), details)
+        case "version", "--version":
+            return (.version, details)
         default:
             return (.usage, details)
         }
@@ -126,7 +129,7 @@ enum CLI {
             switch command {
             case .usage:
                 return (nil, """
-                Usage: ical [today|tomorrow|week|month|next N|calendars|cal NAME [DAYS]|detail|debug] [-x]
+                Usage: ical [today|tomorrow|week|month|next N|calendars|cal NAME [DAYS]|detail|debug|version] [-x]
                        ical add --title T --start ISO [--end ISO] [--all-day] [--cal NAME] [--location L] [--notes N] [--url U]
                        ical edit ID [--title T] [--start ISO] [--end ISO] [--all-day] [--cal NAME] [--location L] [--notes N] [--url U]
                        ical rm ID
@@ -158,6 +161,8 @@ enum CLI {
                 try store.ensureAccess()
                 let events = try store.events(offsetDays: off, days: days, calendarName: nil)
                 return (Renderer.raw(events), nil, 0)
+            case .version:
+                return ("ical \(AppVersion.current)", nil, 0)
             }
         } catch let e as StoreError {
             return (nil, Self.message(for: e), 1)

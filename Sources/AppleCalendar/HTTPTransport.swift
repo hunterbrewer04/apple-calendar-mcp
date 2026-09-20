@@ -3,30 +3,86 @@ import HTTPTypes
 import Hummingbird
 import MCP
 import NIOCore
+import NIOPosix
+import ServiceLifecycle
+import UnixSignals
 
 enum HTTPRunner {
     static func run(store: CalendarStore, config: ServerConfig) async throws {
-        // One MCP Server + transport *per session*, not one shared instance.
-        //
-        // The SDK's StatefulHTTPServerTransport (and the Server it drives) are
-        // single-session and one-shot: the first `initialize` binds the transport's
-        // session id, and a client `DELETE` terminates the transport permanently.
-        // A single process-wide instance therefore stops accepting new clients as
-        // soon as the first one disconnects (which Claude Code does on shutdown),
-        // surfacing as "Session already initialized" on every later connect. This
-        // manager mirrors the SDK's reference `HTTPApp`: each `initialize` mints a
-        // fresh session, later requests route by `MCP-Session-Id`, and sessions are
-        // torn down on `DELETE` or evicted least-recently-used once the table is full.
-        let app = makeApplication(config: config, sessions: SessionManager(store: store))
-        try await app.runService()
+        try await withBindRetry { try await probeBind(host: config.host, port: config.port) }
+        let sessions = SessionManager(store: store, maxSessions: config.maxSessions)
+        try await makeServiceGroup(config: config, sessions: sessions).run()
     }
 
-    /// Builds the HTTP application without running it.
+    /// The application plus the session drain, in that order. `ServiceGroup` shuts services
+    /// down last-first and waits for each to exit before signalling the next, so on SIGTERM
+    /// the drain closes every session and only then is Hummingbird told to stop. Hummingbird's
+    /// own `runService()` cannot be used: `Application.services` run *before* the server in
+    /// its inner group, so nothing there can run ahead of the server's quiesce.
     ///
-    /// `run` blocks forever inside `runService`, which is what production wants but
-    /// leaves nothing for a test to hold on to. Tests call this with `config.port == 0`,
-    /// read the bound port back from `onServerRunning`, drive real HTTP against it, and
-    /// stop the server by cancelling the task that awaits `app.run()`.
+    /// `shutdownBackstop` cancels everything if graceful shutdown still stalls; it sits inside
+    /// the LaunchAgent's `ExitTimeOut` so a stall exits on its own before launchd SIGKILLs.
+    static func makeServiceGroup(
+        config: ServerConfig,
+        sessions: SessionManager,
+        gracefulShutdownSignals: [UnixSignal] = [.sigterm, .sigint],
+        shutdownBackstop: Duration? = .seconds(3),
+        onServerRunning: @escaping @Sendable (any Channel) async -> Void = { _ in }
+    ) -> ServiceGroup {
+        let app = makeApplication(config: config, sessions: sessions, onServerRunning: onServerRunning)
+        var configuration = ServiceGroupConfiguration(
+            services: [app, SessionDrain(sessions: sessions)],
+            gracefulShutdownSignals: gracefulShutdownSignals,
+            logger: app.logger)
+        configuration.maximumGracefulShutdownDuration = shutdownBackstop
+        return ServiceGroup(configuration: configuration)
+    }
+
+    /// launchd starts the agent at login, often before Tailscale has brought up the address the
+    /// plist binds to. Retry for a bounded window instead of exiting and letting KeepAlive turn
+    /// the race into a restart every 10 s. The window is bounded on purpose: a permanently wrong
+    /// address still ends in an exit, so `runs` in `ical serve status` climbs and the fault stays
+    /// visible.
+    static func withBindRetry(
+        timeout: Duration = .seconds(60),
+        interval: Duration = .seconds(2),
+        sleep: (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        _ body: () async throws -> Void
+    ) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while true {
+            do {
+                return try await body()
+            } catch where isAddressNotReady(error) && ContinuousClock.now < deadline {
+                FileHandle.standardError.write(
+                    Data("bind failed (\(error)); retrying in \(interval.components.seconds)s\n".utf8))
+                try await sleep(interval)
+            }
+        }
+    }
+
+    /// The two ways a not-yet-up address fails: an IP literal the kernel does not own yet
+    /// (EADDRNOTAVAIL from `bind`), or a name that does not resolve yet because DNS/MagicDNS
+    /// is still coming up. Anything else (port in use, bad address) is a real error.
+    static func isAddressNotReady(_ error: any Error) -> Bool {
+        if let io = error as? IOError { return io.errnoCode == EADDRNOTAVAIL }
+        return error is SocketAddressError.UnknownHost
+    }
+
+    /// A throwaway bind on the configured address, closed as soon as it succeeds. This is what
+    /// gets retried rather than `runService` itself: each `runService` attempt installs the
+    /// graceful-shutdown signal handlers (SIGTERM/SIGINT set to SIG_IGN plus a dispatch source)
+    /// and a failed attempt leaves them ignored, so retrying the whole server would make
+    /// `launchctl kickstart -k` and Ctrl-C fall on deaf ears for the length of the wait.
+    private static func probeBind(host: String, port: Int) async throws {
+        let channel = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .bind(host: host, port: port).get()
+        try await channel.close().get()
+    }
+
+    /// Builds the HTTP application without running it. Tests go through `makeServiceGroup`
+    /// with `config.port == 0`, read the bound port back from `onServerRunning`, drive real
+    /// HTTP against it, and stop the server with `triggerGracefulShutdown()`.
     static func makeApplication(
         config: ServerConfig,
         sessions: SessionManager,
@@ -142,15 +198,36 @@ enum HTTPRunner {
     }
 }
 
+/// Idles until graceful shutdown is triggered, then closes every MCP session.
+///
+/// Hummingbird's stop waits for in-flight responders, and an SSE responder stays in flight
+/// until its session's transport finishes the stream, which for an abandoned session is
+/// never. Closing the sessions first (`disconnect()` finishes every stream) is what lets the
+/// server's quiesce complete; before this, every restart sat on abandoned streams until
+/// launchd's SIGKILL.
+struct SessionDrain: Service {
+    let sessions: SessionManager
+
+    func run() async throws {
+        try await gracefulShutdown()
+        await sessions.closeAll()
+    }
+}
+
 // MARK: - Per-session management
 
-/// Owns one `Server` + `StatefulHTTPServerTransport` per MCP session id.
+/// Owns one `Server` + `StatefulHTTPServerTransport` per MCP session id, not one
+/// shared instance.
 ///
-/// See the note in `HTTPRunner.run` for *why* this exists. In short: the SDK
-/// transports are single-session and one-shot, so a long-lived server that
-/// different clients (and reconnects) hit over time must create a fresh
-/// server/transport per `initialize` and route subsequent requests by their
-/// `MCP-Session-Id` — exactly what the SDK's reference `HTTPApp` does.
+/// The SDK's `StatefulHTTPServerTransport` (and the `Server` it drives) are
+/// single-session and one-shot: the first `initialize` binds the transport's
+/// session id, and a client `DELETE` terminates the transport permanently.
+/// A single process-wide instance therefore stops accepting new clients as
+/// soon as the first one disconnects (which Claude Code does on shutdown),
+/// surfacing as "Session already initialized" on every later connect. This
+/// manager mirrors the SDK's reference `HTTPApp`: each `initialize` mints a
+/// fresh session, later requests route by `MCP-Session-Id`, and sessions are
+/// torn down on `DELETE` or evicted least-recently-used once the table is full.
 ///
 /// Unlike the reference `HTTPApp`, there is deliberately NO background reaper task.
 /// The reference's 60 s `Task.sleep` cleanup loop aborted this process on its first
@@ -186,6 +263,10 @@ actor SessionManager {
     private let maxSessions: Int
     private var sessions: [String: Session] = [:]
     private var accessCounter: UInt64 = 0
+    /// Set by `closeAll`. A client whose stream was just closed reconnects at once; letting
+    /// that `initialize` through would open a fresh SSE responder and stall the very shutdown
+    /// that closed it.
+    private var draining = false
 
     init(store: CalendarStore, maxSessions: Int = SessionManager.defaultMaxSessions) {
         precondition(maxSessions > 0, "maxSessions must allow at least one live session")
@@ -250,6 +331,13 @@ actor SessionManager {
             return .error(statusCode: 500, .internalError("Failed to start session: \(error.localizedDescription)"))
         }
 
+        // Checked after the awaits above, not before them: `closeAll` may have swept the
+        // table while this initialize was suspended, and a session inserted behind its
+        // sweep would keep the server's quiesce waiting.
+        guard !draining else {
+            await transport.disconnect()
+            return .error(statusCode: 503, .internalError("Server is shutting down"))
+        }
         // Make room first, then insert in the same actor turn, so the table never
         // holds more than `maxSessions` entries and the new session is never a victim.
         await evictLeastRecentlyUsed(downTo: maxSessions - 1)
@@ -281,6 +369,12 @@ actor SessionManager {
                 Data("session \(victim.key) client=\(victim.value.client) evicted (cap \(maxSessions))\n".utf8))
             await closeSession(victim.key)
         }
+    }
+
+    /// Closes every session and refuses new ones from here on. Called once, on shutdown.
+    func closeAll() async {
+        draining = true
+        for sessionID in sessions.keys { await closeSession(sessionID) }
     }
 
     private func closeSession(_ sessionID: String) async {

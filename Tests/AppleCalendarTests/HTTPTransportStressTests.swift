@@ -1,6 +1,7 @@
 import XCTest
 import MCP
 import NIOCore
+import ServiceLifecycle
 @testable import apple_calendar
 
 /// Churns real MCP sessions through the real Hummingbird server over loopback.
@@ -10,40 +11,45 @@ import NIOCore
 /// connection without a `DELETE`. That is the traffic under which the old background
 /// reaper aborted the process (`swift_task_dealloc`, Swift 6.2 release builds) on its
 /// first 60 s wake. This test guards the replacement — inline LRU eviction on the
-/// request path — by running it hundreds of times in a few seconds and checking the
-/// server still answers and the table respected its cap. It would NOT have caught the
-/// original bug: that needed 60 s of wall clock and the older toolchain. What it does
-/// give is a loud failure mode for the same class of defect: a runtime abort in the
-/// session lifecycle kills the test process, which no assertion can miss.
+/// request path — by running it a couple of hundred times in a couple of seconds and
+/// checking the server still answers and the table respected its cap. It would NOT
+/// have caught the original bug: that needed 60 s of wall clock and the older
+/// toolchain, and no cycle count reproduces it here. What it does give is a loud
+/// failure mode for the same class of defect: a runtime abort in the session
+/// lifecycle kills the test process, which no assertion can miss.
+///
+/// The churn also leaves abandoned SSE streams behind, which is what used to hold the
+/// server's graceful shutdown open until launchd's SIGKILL, so the test ends with a real
+/// graceful shutdown under a watchdog rather than by cancelling the server task.
 ///
 /// Run this in release too (`swift test -c release`): the original abort was only ever
 /// reproduced in release builds, so a debug-only suite has a blind spot here.
 final class HTTPTransportStressTests: XCTestCase {
-    /// The historical abort hit at ~55 sessions; 1,000 is ~20x that.
-    private static let cycles = 1_000
-    /// Small cap so eviction runs hundreds of times, not once.
+    /// The historical abort hit at ~55 sessions; 200 is ~4x that and, at a cap of 8,
+    /// evicts ~190 times. The eviction path is the same at any count, and the original
+    /// abort is not reproducible here, so more cycles buy nothing.
+    private static let cycles = 200
+    /// Small cap so eviction runs on nearly every cycle, not once.
     private static let maxSessions = 8
 
     func testSessionChurnDoesNotCrashAndStaysBounded() async throws {
-        let sessions = SessionManager(store: MockCalendarStore(), maxSessions: Self.maxSessions)
         // Port 0 → kernel picks an ephemeral port; `onServerRunning` reports it back.
         let config = ServerConfig(host: "127.0.0.1", port: 0, tokens: [:], allowNoAuth: true,
-                                  homeDir: NSTemporaryDirectory())
+                                  homeDir: NSTemporaryDirectory(), maxSessions: Self.maxSessions)
+        let sessions = SessionManager(store: MockCalendarStore(), maxSessions: config.maxSessions)
         let (ports, portSink) = AsyncStream<Int>.makeStream()
+        // No signals (this is the test process) and no backstop: a shutdown that stalls must
+        // trip the watchdog below, not get rescued by cancellation.
+        let serviceGroup = HTTPRunner.makeServiceGroup(config: config, sessions: sessions,
+                                                       gracefulShutdownSignals: [], shutdownBackstop: nil) { channel in
+            portSink.yield(channel.localAddress?.port ?? -1)
+        }
 
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
-                let app = HTTPRunner.makeApplication(config: config, sessions: sessions) { channel in
-                    portSink.yield(channel.localAddress?.port ?? -1)
-                }
-                // Cancelling this task is how the test stops the server. Finishing the
-                // port stream on any exit keeps a failed bind from hanging the test.
+                // Finishing the port stream on any exit keeps a failed bind from hanging the test.
                 defer { portSink.finish() }
-                do {
-                    try await app.run()
-                } catch {
-                    if !Task.isCancelled { throw error }
-                }
+                try await serviceGroup.run()
             }
 
             var iterator = ports.makeAsyncIterator()
@@ -72,12 +78,21 @@ final class HTTPTransportStressTests: XCTestCase {
             XCTAssertLessThanOrEqual(live, Self.maxSessions)
             XCTAssertGreaterThan(live, 0)
 
+            // Graceful shutdown has to finish on its own with those abandoned streams live.
+            await serviceGroup.triggerGracefulShutdown()
+            group.addTask {
+                try? await Task.sleep(for: .seconds(5))
+                if !Task.isCancelled { throw ShutdownStalled() }
+            }
+            try await group.next()   // the server exiting, or the watchdog throwing
             group.cancelAll()
-            // Drain so a real server-side error (not cancellation) surfaces as itself
-            // instead of as whatever confusing client error it caused first.
             while try await group.next() != nil {}
+            let remaining = await sessions.count
+            XCTAssertEqual(remaining, 0)
         }
     }
+
+    private struct ShutdownStalled: Error {}
 }
 
 // MARK: - Minimal Streamable-HTTP client
@@ -105,7 +120,7 @@ private struct MCPHTTPClient {
             throw ClientError.missingSessionID
         }
         let result = try Self.firstJSONRPCPayload(in: data)
-        guard result["result"] != nil else { throw ClientError.rpcError("initialize", result["error"]) }
+        guard result["result"] != nil else { throw ClientError.rpcError("initialize", result["error"].map { "\($0)" }) }
         return id
     }
 
@@ -121,7 +136,7 @@ private struct MCPHTTPClient {
         let payload = try Self.firstJSONRPCPayload(in: data)
         guard let result = payload["result"] as? [String: Any],
               let tools = result["tools"] as? [[String: Any]] else {
-            throw ClientError.rpcError("tools/list", payload["error"])
+            throw ClientError.rpcError("tools/list", payload["error"].map { "\($0)" })
         }
         return tools.compactMap { $0["name"] as? String }
     }
@@ -176,14 +191,14 @@ private struct MCPHTTPClient {
     enum ClientError: Error, CustomStringConvertible {
         case status(Int, String)
         case missingSessionID
-        case rpcError(String, Any?)
+        case rpcError(String, String?)
         case malformed(String)
 
         var description: String {
             switch self {
             case .status(let code, let what): "\(what): unexpected HTTP \(code)"
             case .missingSessionID: "initialize: no \(HTTPHeaderName.sessionID) header"
-            case .rpcError(let what, let error): "\(what): JSON-RPC error \(error.map { "\($0)" } ?? "<none>")"
+            case .rpcError(let what, let error): "\(what): JSON-RPC error \(error ?? "<none>")"
             case .malformed(let body): "malformed SSE body: \(body.prefix(200))"
             }
         }

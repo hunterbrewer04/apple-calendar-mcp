@@ -23,6 +23,9 @@ final class ServeTests: XCTestCase {
         XCTAssertTrue(xml.contains("<string>3456</string>"))
         XCTAssertTrue(xml.contains("<key>RunAtLoad</key>"))
         XCTAssertTrue(xml.contains("<key>KeepAlive</key>"))
+        // Bounds how long a restart hangs while the server waits on abandoned SSE streams.
+        XCTAssertTrue(xml.contains("<key>ExitTimeOut</key>"))
+        XCTAssertTrue(xml.contains("<integer>5</integer>"))
     }
 
     func testClientConfigJSON() {
@@ -296,6 +299,37 @@ final class ServeTests: XCTestCase {
         XCTAssertTrue(xml.contains("<string>/opt/R&amp;D/ical</string>"))
         XCTAssertTrue(xml.contains("/h/Logs/a&lt;b.log"))
         XCTAssertFalse(xml.contains("/opt/R&D/ical"))   // raw ampersand must not survive
+    }
+
+    // MARK: - serve status
+
+    // Shaped like real `launchctl print gui/<uid>/<label>` output: tab-indented service-level
+    // lines (with `runs` ahead of `pid`, as launchd prints them), then nested coalition blocks
+    // whose own `state = active` must not shadow the service's `state = running`.
+    private let launchctlPrintFixture = """
+    gui/501/com.apple-calendar-mcp = {
+    \tactive count = 1
+    \tpath = /Users/h/Library/LaunchAgents/com.apple-calendar-mcp.plist
+    \ttype = LaunchAgent
+    \tstate = running
+
+    \tminimum runtime = 10
+    \truns = 3
+    \tpid = 38398
+    \timmediate reason = inefficient
+    \tlast exit reason = OS_REASON_CODESIGNING
+    }
+    """
+
+    func testLaunchctlSummaryPicksServiceLinesInKeyOrder() {
+        XCTAssertEqual(Serve.launchctlSummary(launchctlPrintFixture),
+                       ["pid = 38398", "runs = 3", "last exit reason = OS_REASON_CODESIGNING"])
+    }
+
+    func testLaunchctlSummarySkipsAbsentLastExitReason() {
+        // launchd only prints `last exit reason` once the job has exited at least once.
+        let fresh = launchctlPrintFixture.replacingOccurrences(of: "\tlast exit reason = OS_REASON_CODESIGNING\n", with: "")
+        XCTAssertEqual(Serve.launchctlSummary(fresh), ["pid = 38398", "runs = 3"])
     }
 
     // MARK: - serve token parsing

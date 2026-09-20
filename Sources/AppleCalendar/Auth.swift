@@ -1,7 +1,28 @@
 import Foundation
 import CryptoKit
 
-enum StartupError: Error, Equatable { case missingToken }
+enum StartupError: Error, Equatable, CustomStringConvertible {
+    case missingToken
+    case invalidMaxSessions
+
+    /// The line printed after `Refusing to start:`; kept here so the text is testable.
+    var description: String {
+        switch self {
+        case .missingToken:
+            return """
+            no auth token found. Provide one via any of:
+              • run `ical serve setup` (writes ~/.config/apple-calendar/token), or
+              • run `ical serve token add <client>` (writes ~/.config/apple-calendar/tokens/<client>), or
+              • set CALENDAR_MCP_TOKEN, or
+              • set CALENDAR_MCP_TOKEN_FILE to a file containing the token, or
+              • create ~/.config/apple-calendar/token.
+            Or pass --no-auth to run without auth (NOT recommended).
+            """
+        case .invalidMaxSessions:
+            return "--max-sessions / CALENDAR_MCP_MAX_SESSIONS must be a whole number of at least 1."
+        }
+    }
+}
 
 struct ServerConfig {
     let host: String
@@ -12,6 +33,8 @@ struct ServerConfig {
     let allowNoAuth: Bool
     /// Kept so HTTPRunner can rebuild the live token loader for the same home.
     let homeDir: String
+    /// Live-session cap handed to SessionManager; past it, least-recently-used sessions are evicted.
+    let maxSessions: Int
 
     /// Open (no auth at all) only when --no-auth was passed AND no env token exists.
     /// Decided once at startup: a token appearing later tightens auth; nothing can loosen it.
@@ -35,7 +58,11 @@ struct ServerConfig {
             tokens: TokenStore.load(env: env, homeDir: homeDir, allowNoAuth: allowNoAuth,
                                     readFile: readFile, listDir: listDir),
             allowNoAuth: allowNoAuth,
-            homeDir: homeDir)
+            homeDir: homeDir,
+            // A value that is set but not a whole number resolves to 0 so `validate` refuses it
+            // rather than silently running with the default.
+            maxSessions: (argValue("--max-sessions") ?? env["CALENDAR_MCP_MAX_SESSIONS"])
+                .map { Int($0) ?? 0 } ?? SessionManager.defaultMaxSessions)
     }
 
     /// Default token-file reader: returns file contents, or nil if unreadable/missing.
@@ -45,6 +72,7 @@ struct ServerConfig {
 
     func validate() throws {
         if tokens.isEmpty && !allowNoAuth { throw StartupError.missingToken }
+        if maxSessions < 1 { throw StartupError.invalidMaxSessions }
     }
 }
 
