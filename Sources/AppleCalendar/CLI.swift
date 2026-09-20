@@ -33,6 +33,7 @@ enum CLI {
             switch s {
             case "tomorrow": return (1, 1)
             case "week", "thisweek": return (0, 7)
+            case "month": return (0, 30)
             case "next": return (0, rest.count > 1 ? (Int(rest[1]) ?? 7) : 7)
             default: return (0, 1)
             }

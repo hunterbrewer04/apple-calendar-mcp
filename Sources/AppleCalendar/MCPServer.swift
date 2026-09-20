@@ -289,7 +289,7 @@ func makeServer(store: CalendarStore) async -> Server {
     let tools = MCPTools(store: store)
     let server = Server(
         name: "apple-calendar",
-        version: "5.0.0",
+        version: AppVersion.current,
         capabilities: .init(tools: .init(listChanged: false))
     )
     await server.withMethodHandler(ListTools.self) { _ in

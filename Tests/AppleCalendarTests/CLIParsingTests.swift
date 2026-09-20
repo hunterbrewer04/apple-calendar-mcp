@@ -33,6 +33,16 @@ final class CLIParsingTests: XCTestCase {
     func testDebugIsRaw() {
         XCTAssertEqual(CLI.parse(["debug", "tomorrow"]).command, .raw(offsetDays: 1, days: 1))
     }
+    // `detail` and `debug` share a period parser that once lacked `month`, so
+    // `ical detail month` silently returned today. Pin the 30-day window.
+    func testDetailMonthIs30Days() {
+        let (cmd, details) = CLI.parse(["detail", "month"])
+        XCTAssertEqual(cmd, .events(offsetDays: 0, days: 30, calendarName: nil))
+        XCTAssertTrue(details)
+    }
+    func testDebugMonthIs30Days() {
+        XCTAssertEqual(CLI.parse(["debug", "month"]).command, .raw(offsetDays: 0, days: 30))
+    }
     func testCalendars() {
         XCTAssertEqual(CLI.parse(["calendars"]).command, .calendars)
     }
