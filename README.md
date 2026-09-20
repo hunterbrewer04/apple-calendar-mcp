@@ -1,74 +1,22 @@
 # apple-calendar-mcp
 
-> A fast, native Apple Calendar tool for macOS. One small binary is both an `ical` terminal
-> command **and** an MCP server — so any MCP-compatible app can read **and change** your
-> calendar, locally or from another machine on your private network.
+[![CI](https://github.com/hunterbrewer04/apple-calendar-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/hunterbrewer04/apple-calendar-mcp/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/github/v/tag/hunterbrewer04/apple-calendar-mcp?label=version&sort=semver)](https://github.com/hunterbrewer04/apple-calendar-mcp/tags)
+[![macOS 14+](https://img.shields.io/badge/macOS-14%2B-blue)](#requirements)
+[![License: MIT](https://img.shields.io/github/license/hunterbrewer04/apple-calendar-mcp)](LICENSE)
 
-It works against the macOS calendar database directly through EventKit (~100 ms per query), so
+A fast, native Apple Calendar tool for macOS. One small binary is both an `ical` terminal
+command and an MCP server, so any MCP-compatible AI app can read and change your calendar,
+on this Mac or from another machine on your private network.
+
+It talks to the macOS calendar database directly through EventKit (about 100 ms per query).
 Calendar.app never has to be open and nothing leaves your machine.
 
-- 🗓️ **Instant queries** — today, this week, a specific calendar, the next N days.
-- ✏️ **Create, update, and delete events** — from the CLI or any MCP client.
-- 🔌 **Two ways to connect** — a local `stdio` server, or an HTTP server other machines can reach.
-- 🔐 **Per-client tokens** — each machine gets its own revocable credential; the server refuses to start with none.
-- 🍺 **One-command install** — Homebrew builds, code-signs, and (optionally) runs it for you.
-
----
-
-## Which mode do you need?
-
-- **Same Mac** (the AI app runs where your calendar lives) → **Local (`stdio`)**. One JSON
-  block, no token, no network. Jump to [Local setup](#mode-1--local-stdio).
-- **Another machine** (laptop, server, phone, a remote Claude Code) → **Networked (HTTP)**.
-  One command sets it up: `ical serve setup`. Jump to [Networked setup](#mode-2--networked-http).
-
----
-
-## Contents
-
-- [Which mode do you need?](#which-mode-do-you-need)
-- [Requirements](#requirements)
-- [Install](#install)
-- [Using the `ical` command](#using-the-ical-command)
-- [Using the MCP server](#using-the-mcp-server)
-- [Connecting from another machine](#connecting-from-another-machine)
-- [Running it securely over a VPN](#running-it-securely-over-a-vpn)
-- [Manual / advanced setup](#manual--advanced-setup)
-- [Configuration reference](#configuration-reference)
-- [Security model](#security-model)
-- [Build from source](#build-from-source)
-- [How it works](#how-it-works)
-- [License](#license)
-
----
-
-## Requirements
-
-- **macOS 14 (Sonoma) or newer** — it uses EventKit's full-access API.
-- **Homebrew**, and the Xcode **Command Line Tools** (`xcode-select --install`). Full Xcode is
-  *not* required.
-
----
-
-## Install
-
-```bash
-brew install hunterbrewer04/tap/apple-calendar
-```
-
-This builds the binary from source, installs it as `ical`, and **code-signs it with a stable
-identity** so the macOS Calendar permission keeps working across upgrades.
-
-The **first time** the tool actually reads your calendar, macOS shows a one-time
-**“Allow Full Access”** dialog — click it. (Nothing prompts during install itself.)
-
-> **Heads-up:** if you already have another `ical` earlier in your `PATH`, Homebrew will tell you
-> it's “shadowed.” Either remove the old one, or call this build by its full path
-> (`$(brew --prefix)/bin/ical`).
-
----
-
-## Using the `ical` command
+- 🗓️ Instant queries: today, this week, the next N days, one calendar by name.
+- ✏️ Create, update, and delete events from the CLI or any MCP client.
+- 🔌 Two ways to connect: a local `stdio` server, or an HTTP server other machines can reach.
+- 🔐 Per-client tokens: each machine gets its own revocable credential; the server refuses to start with none.
+- 🍺 One-command install: Homebrew builds and code-signs it; one more command runs it in the background.
 
 ```
 $ ical today
@@ -81,32 +29,104 @@ $ ical today
                               📅 Work
 ```
 
+## Contents
+
+- [Quick start](#quick-start)
+- [Requirements](#requirements)
+- [CLI reference](#cli-reference)
+- [MCP server](#mcp-server)
+  - [Tools](#tools)
+  - [Local (stdio)](#local-stdio)
+  - [Networked (HTTP)](#networked-http)
+  - [Managing the networked server](#managing-the-networked-server)
+- [Troubleshooting](#troubleshooting)
+- [Configuration reference](#configuration-reference)
+- [Security model](#security-model)
+- [Uninstall](#uninstall)
+- [Build from source](#build-from-source)
+- [Claude Code skill](#claude-code-skill)
+- [How it works](#how-it-works)
+- [License](#license)
+
+## Quick start
+
+### 1. Install
+
+```bash
+brew install hunterbrewer04/tap/apple-calendar
+```
+
+Homebrew builds the binary from source (it compiles Swift, so allow a few minutes), installs it as `ical`,
+and code-signs it with a stable identity so the macOS Calendar permission keeps working across
+upgrades.
+
+### 2. Grant Calendar access
+
+```bash
+ical today
+```
+
+The first read triggers a one-time macOS dialog. Click **Allow Full Access**. Do this from
+Terminal before anything else: a background server may not be able to show you the dialog,
+and every MCP client depends on this grant.
+
+### 3. Connect an AI app
+
+Pick the row that matches where the AI app runs.
+
+| The app runs on... | Do this |
+|---|---|
+| This Mac (Claude Code, Claude Desktop, Cursor, ...) | Add the [local stdio config](#local-stdio). No token, no network. |
+| Another machine (a server, laptop, or remote Claude Code) | `ical serve setup --tailscale`, then `ical serve connect <ssh-host>`. See [Networked (HTTP)](#networked-http). |
+
+Claude Code on this Mac, in one line:
+
+```bash
+claude mcp add --scope user apple-calendar -- ical mcp
+```
+
+That's it. Ask your assistant what's on your calendar.
+
+## Requirements
+
+- macOS 14 (Sonoma) or newer. The tool uses EventKit's full-access API.
+- Homebrew and the Xcode Command Line Tools (`xcode-select --install`). Full Xcode is not
+  required to install or run; it is only needed to run the test suite.
+
+## CLI reference
+
+### Reading
+
 | Command | Shows |
 |---|---|
-| `ical` / `ical today` | today (the default) |
+| `ical` or `ical today` | today (the default) |
 | `ical tomorrow` | tomorrow |
 | `ical week` | the next 7 days |
 | `ical month` | the next 30 days |
-| `ical next 14` | the next *N* days |
+| `ical next 14` | the next N days |
+| `ical cal "Work" 14` | one calendar by name, optional day count (default 7) |
 | `ical calendars` | the names of all your calendars |
-| `ical cal "Work" 14` | one calendar by name (optional day count, default 7) |
-| `ical detail week` | any period, with notes + URLs |
-| `ical debug today` | raw, pipe-delimited output (for scripts) |
+| `ical detail week` | `today`, `tomorrow`, `week`, `month`, or `next N`, with notes, URLs, and event ids |
+| `ical debug today` | same periods, raw pipe-delimited output for scripts |
 
-Add **`-x`** (or `--detail`) to any command to include event notes and URLs (and the event **id**,
-which `edit`/`rm` need).
+Add `-x` (or `--detail`) to any read command to include notes, URLs, and the event id that
+`edit` and `rm` need (for a single calendar: `ical cal "Work" 14 -x`). `ical detail <period>` is
+the same thing with `-x` implied.
 
-### Creating and changing events
+Recurring events are expanded into individual occurrences. A multi-day event that started
+earlier still shows up (with its original start date) for as long as it overlaps the window.
+
+### Writing
 
 ```bash
-# add a timed event
+# a timed event
 ical add --title "Standup" --start 2026-07-01T09:00 --end 2026-07-01T09:15 --cal "Work"
 
-# add an all-day event
+# an all-day event
 ical add --title "Offsite" --start 2026-07-01 --all-day --cal "Work"
 
 # find an event's id, then edit or remove it
-ical detail today            # note the 🆔 line
+ical detail today            # read the 🆔 line
 ical edit <id> --title "Standup (moved)" --start 2026-07-01T09:30 --end 2026-07-01T09:45
 ical rm <id>
 ```
@@ -114,134 +134,160 @@ ical rm <id>
 | Command | Does |
 |---|---|
 | `ical add --title T --start ISO [--end ISO] [--all-day] [--cal NAME] [--location L] [--notes N] [--url U]` | create an event |
-| `ical edit ID [--title …] [--start …] [--end …] [--all-day] [--cal …] [--location …] [--notes …] [--url …]` | change the given fields of an event |
+| `ical edit ID [--title T] [--start ISO] [--end ISO] [--all-day] [--cal NAME] [--location L] [--notes N] [--url U]` | change only the fields you pass |
 | `ical rm ID` | delete an event |
 
-Dates are ISO-8601 (`2026-07-01T14:30`); for `--all-day` events pass a plain date (`2026-07-01`).
-`edit` changes only the fields you pass and leaves the rest untouched.
+- Dates are ISO-8601: `2026-07-01T14:30` or `2026-07-01T14:30:00`, with an optional `Z` or
+  offset. Without an offset they're read in the Mac's local time zone.
+- All-day events take a plain date (`2026-07-01`). Timed events require `--end`.
+- With no `--cal`, new events go to your default calendar.
+- Aliases: `calendar` for `cal`, `delete` for `rm`, `thisweek` for `week`, `details` or `notes`
+  for `detail`, `--calendar` for `--cal`, `--loc` for `--location`, `--allday` for `--all-day`.
+- Every error exits non-zero with the fix on stderr.
 
-> Recurring events are expanded to individual occurrences, and a multi-day event that started
-> earlier still shows up (with its original start date) for as long as it overlaps the window.
+## MCP server
 
----
+The same binary speaks the [Model Context Protocol](https://modelcontextprotocol.io), so an AI
+assistant can call your calendar as a tool.
 
-## Using the MCP server
+### Tools
 
-The same binary speaks the **Model Context Protocol (MCP)**, so an AI assistant or any
-MCP-compatible app can call it as a tool. There are two modes.
+| Tool | Arguments | What it does |
+|---|---|---|
+| `list_calendars` | | names of all calendars |
+| `get_today`, `get_tomorrow` | `details?` | a single day |
+| `get_week`, `get_month` | `details?` | the next 7 / 30 days |
+| `get_next_days` | `days`, `details?` | the next N days |
+| `get_calendar_events` | `calendar_name`, `days?` (7), `details?` | one calendar by name |
+| `create_event` | `title`, `start`, `end?`, `all_day?`, `calendar_name?`, `location?`, `notes?`, `url?` | create an event |
+| `update_event` | `event_id`, plus any of the fields above | change only the fields you pass |
+| `delete_event` | `event_id` | delete an event |
 
-### Mode 1 — Local (`stdio`)
+`details: true` on any read tool adds notes, URLs, and each event's `id`, which `update_event`
+and `delete_event` need. `create_event` requires `end` unless `all_day` is true. Dates follow the
+same ISO-8601 rules as the CLI.
 
-Best when the app runs on the **same Mac**. The app launches the binary and talks to it over its
-standard input/output — no network, no token. Add this to your MCP client's config file:
+### Local (stdio)
+
+For an app on the same Mac. The app launches `ical mcp` itself and talks over stdin/stdout:
+no network, no token.
+
+Claude Code:
+
+```bash
+claude mcp add --scope user apple-calendar -- ical mcp
+```
+
+Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`) or any
+other client that takes a JSON config:
 
 ```json
 {
   "mcpServers": {
-    "apple-calendar": { "type": "stdio", "command": "ical", "args": ["mcp"] }
+    "apple-calendar": { "command": "/opt/homebrew/bin/ical", "args": ["mcp"] }
   }
 }
 ```
 
-### Mode 2 — Networked (HTTP)
+GUI apps don't see your shell's `PATH`, so use the absolute path from `which ical`
+(`/opt/homebrew/bin/ical` on Apple Silicon, `/usr/local/bin/ical` on Intel).
 
-For an app on another machine on your private network (see the
-[VPN section](#running-it-securely-over-a-vpn) — never the open internet). One command does
-everything:
+### Networked (HTTP)
 
-```bash
-brew install hunterbrewer04/tap/apple-calendar
-ical serve setup --tailscale      # or: --host <your-private-ip>   (bare = loopback only)
+For an app on another machine. The Mac runs a small HTTP server in the background; other
+machines on your private network call it with a bearer token.
+
+> The server speaks plain HTTP with no encryption and grants read and write access to your
+> whole calendar. Only run it on a private network (a VPN like Tailscale, or loopback). Never
+> expose port 3456 to the internet.
+
+#### Step 1: grant Calendar access on the Mac
+
+If you skipped it above, run `ical today` in Terminal and click Allow Full Access. The
+background server inherits this grant; it may not be able to prompt for it on its own.
+
+#### Step 2: put both machines on a private network
+
+Tailscale is the easiest: install it on the Mac and the client, sign both into the same
+tailnet, and you're done. `ical serve setup --tailscale` reads the Mac's tailnet IP for you.
+
+<details>
+<summary>Optional: restrict the port with a tailnet ACL</summary>
+
+In the Tailscale admin console policy file, allow only your own devices to reach the port:
+
+```jsonc
+{
+  "acls": [
+    { "action": "accept", "src": ["autogroup:member"], "dst": ["YOUR-MAC:3456"] }
+  ]
+}
 ```
 
-`serve setup` generates a token (saved to `~/.config/apple-calendar/token`, chmod 600),
-installs a background LaunchAgent bound to your chosen address, starts it, and prints the exact
-client config to paste on the other machine. It **survives reboots and `brew upgrade`** — no
-`launchctl setenv`, nothing to redo.
+</details>
 
-Manage it any time:
+<details>
+<summary>WireGuard or another private network</summary>
 
-| Command | Does |
-|---|---|
-| `ical serve status` | is it up? (expects `401` = up + auth enforced) + re-prints client config |
-| `ical serve token` | print the **default** token (`ical serve token \| pbcopy`) |
-| `ical serve token add <client> [--force]` | mint a token for a named client (errors if it already exists, unless `--force`) |
-| `ical serve token show <client>` | print that client's token (`ical serve token show brewserver \| pbcopy`) |
-| `ical serve token revoke <client>` | delete a client's token — that machine loses access within ~5s |
-| `ical serve token list` | list every client + a `sha256:` fingerprint (never prints raw tokens) |
-| `ical serve connect <ssh-host>` | one-command setup of a remote machine's Claude Code |
-| `ical serve uninstall` | stop and remove the background server (`--purge` also deletes all tokens) |
-
-> The HTTP server is **fail-closed**: with no token resolvable it refuses to start. (You can pass
-> `--no-auth` to override that, but only on a fully trusted, isolated interface.)
-
-Logs go to `~/Library/Logs/apple-calendar.log`.
-
-### Available tools
-
-> The HTTP server handles **multiple concurrent clients and reconnects** — each MCP session is
-> isolated — so several apps (and repeated connect/disconnect cycles) can point at it at once.
-
-| Tool | What it does |
-|---|---|
-| `list_calendars` | the names of all calendars |
-| `get_today` / `get_tomorrow` | a single day |
-| `get_week` / `get_month` | the next 7 / 30 days |
-| `get_next_days(days)` | the next *N* days |
-| `get_calendar_events(calendar_name, days)` | one calendar by name |
-| `create_event(title, start, end, …)` | create a new event |
-| `update_event(event_id, …)` | change fields of an existing event |
-| `delete_event(event_id)` | delete an event |
-
-The read tools accept `details: true` to include notes, URLs, and each event's **id**. The write
-tools take ISO-8601 dates (`2026-07-01T14:30`; a plain date like `2026-07-01` for `all_day` events);
-`update_event`/`delete_event` reference an event by the `id` returned in a `details: true` listing.
-`create_event` and `update_event` also accept `calendar_name`, `location`, `notes`, and `url`.
-
----
-
-## Connecting from another machine
-
-You can read your Mac's calendar from a laptop, server, or phone — as long as both devices are on
-the same **private network** (see the VPN section below; never expose this to the open internet).
-
-There are two sides to set up.
-
-### On the Mac (the server)
-
-Run one command — it generates the token, binds to your chosen private-network address, and
-starts the background server (see [Mode 2](#mode-2--networked-http)):
+Bind to the Mac's address on that network with `--host`:
 
 ```bash
-ical serve setup --tailscale      # or --host <your-private-ip>   (with a VPN this is your VPN IP)
+ical serve setup --host 10.0.0.1
 ```
 
-It prints the token and the ready-to-paste client config. Grab the token again any time with
-`ical serve token`.
+On each WireGuard peer, scope `AllowedIPs` so only that route goes through the tunnel:
 
-### On the other machine (the client)
+```ini
+[Peer]
+# ...the Mac's public key + endpoint...
+AllowedIPs = 10.0.0.1/32
+```
 
-If Claude Code runs the client and you have **key-based ssh** to it, wire it up in one command
-**from the Mac** — no config editing on the other side:
+</details>
+
+#### Step 3: start the server
 
 ```bash
-ical serve connect brewserver      # any ssh host or ~/.ssh/config alias
+ical serve setup --tailscale        # or: --host <private-ip>
 ```
 
-It mints (or reuses, on a repeat run) a **token scoped to that ssh host** — not the shared
-default token — then over ssh installs the `apple-calendar` MCP server into that host's Claude
-Code (user scope) and probes the server *from* that host to confirm the server is reachable from
-that machine and auth is enforced. The token travels only over the ssh channel. On a host without
-key-based ssh, run `ical serve connect <host> --print` to print the `claude mcp add …` one-liner
-to paste there yourself — it's built with that same per-host token.
+One command does everything:
 
-Because each machine gets its own credential, you can cut one off without touching the rest:
-`ical serve token revoke <host>` deletes just that host's token, and a running server rejects it
-within ~5 seconds — every other connected client keeps working.
+- Generates a token at `~/.config/apple-calendar/token` (mode 600). An existing token is
+  reused; `--force` rotates it.
+- Writes a user LaunchAgent (`~/Library/LaunchAgents/com.apple-calendar-mcp.plist`) that
+  points at Homebrew's stable `opt` path, so it survives reboots and `brew upgrade`.
+- Starts it, probes it, and prints the client config plus a ready-made `claude mcp add` line.
 
-Otherwise — no ssh, or a client that isn't Claude Code — mint that client its own token by hand
-with `ical serve token add <client>` (see the [`ical serve`](#mode-2--networked-http) table
-above), then point the MCP client at the Mac's address and include the token as a bearer header:
+Flags: `--tailscale`, `--host <ip>`, or `--local` (loopback, the default); `--port <n>`
+(default 3456); `--force`. Safe to re-run at any time.
+
+#### Step 4: connect a client
+
+Three ways, depending on what's on the other machine.
+
+**Claude Code, with key-based ssh to that machine.** Run this on the Mac:
+
+```bash
+ical serve connect my-server         # any ssh host or ~/.ssh/config alias
+```
+
+It mints a token scoped to that host (reused on repeat runs), registers the server in that
+machine's Claude Code (user scope) over ssh, and probes the server from that side to confirm
+it's reachable and auth is enforced. The token only ever travels over ssh. Requires `claude`
+on the remote's login-shell `PATH`.
+
+**Claude Code, no ssh.** Print the one-liner and paste it there yourself:
+
+```bash
+ical serve connect my-server --print
+```
+
+**Any other MCP client.** Mint that client a token, then paste the config it prints:
+
+```bash
+ical serve token add my-laptop
+```
 
 ```json
 {
@@ -255,12 +301,16 @@ above), then point the MCP client at the Mac's address and include the token as 
 }
 ```
 
-A copy you can edit is in [`examples/mcp-config.json`](examples/mcp-config.json).
+An editable copy is in [`examples/mcp-config.json`](examples/mcp-config.json). Client names may use
+letters, digits, `.`, `_`, and `-`, and must start with a letter or digit; `default` is reserved.
 
-**Quick test from the other machine:**
+Each machine gets its own credential, so you can cut one off without touching the rest:
+`ical serve token revoke my-laptop` takes effect on the running server within about 5 seconds.
+
+#### Step 5: verify from the client
 
 ```bash
-# no token → 401 (good: it's locked)
+# no token → 401 means the server is up and locked
 curl -s -o /dev/null -w "%{http_code}\n" -X POST http://YOUR-MAC-IP:3456/mcp \
   -H 'Accept: application/json, text/event-stream' -d '{}'
 
@@ -271,149 +321,123 @@ curl -s -X POST http://YOUR-MAC-IP:3456/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}'
 ```
 
----
+### Managing the networked server
 
-## Running it securely over a VPN
+| Command | Does |
+|---|---|
+| `ical serve status` | LaunchAgent state, liveness (`401` = up and locked), known clients, and the client config |
+| `ical serve token list` | every client with a `sha256:` fingerprint (never prints raw tokens) |
+| `ical serve token show <client>` | print one client's token, no trailing newline (`\| pbcopy` friendly) |
+| `ical serve token add <client> [--force]` | mint a token for a named client; `--force` rotates an existing one |
+| `ical serve token revoke <client>` | delete a client's token; the server rejects it within ~5 s, no restart |
+| `ical serve token` | print the default token written by `setup` |
+| `ical serve setup ... --force` | rotate the default token and restart |
+| `ical serve uninstall [--purge]` | stop and remove the server; `--purge` also deletes every token |
 
-The HTTP server speaks **plain HTTP with no transport encryption**, and it grants read **and write**
-access to your whole calendar. **Do not expose port 3456 to the public internet.** Instead, put both
-machines on a private VPN and bind the server to the VPN interface. Two good options:
+Logs go to `~/Library/Logs/apple-calendar.log`. Each session is attributed to the client
+whose token opened it (`session <id> client=<name>`).
 
-### Option A — Tailscale (recommended)
-
-[Tailscale](https://tailscale.com) gives every device a stable private IP in the `100.x.y.z`
-range and handles all the networking for you.
-
-1. **Install Tailscale on the Mac and on the client machine**, and sign both into the same
-   account (“tailnet”).
-
-2. **Find the Mac's tailnet IP:**
-
-   ```bash
-   tailscale ip -4        # e.g. 100.101.102.103
-   ```
-
-3. **Bind the server to it:**
-
-   ```bash
-   ical serve setup --tailscale      # reads `tailscale ip -4` for you
-   ```
-
-4. On the client, use `http://100.101.102.103:3456/mcp` in the config above.
-
-5. **(Optional) Lock it down with a tailnet ACL** so only *your* devices can reach the port. In
-   your Tailscale admin console policy file:
-
-   ```jsonc
-   {
-     "acls": [
-       // allow only your own devices to reach the calendar port on the Mac
-       { "action": "accept", "src": ["autogroup:member"], "dst": ["YOUR-MAC:3456"] }
-     ]
-   }
-   ```
-
-### Option B — WireGuard
-
-If you run your own [WireGuard](https://www.wireguard.com) network, the Mac has a WireGuard
-interface address (for example `10.0.0.1`).
-
-1. **Bind the server to the WireGuard interface address:**
-
-   ```bash
-   ical serve setup --host 10.0.0.1
-   ```
-
-2. On each peer that should reach it, **scope `AllowedIPs`** to just what's needed so only that
-   route is sent over the tunnel — e.g. in the peer's WireGuard config:
-
-   ```ini
-   [Peer]
-   # ...the Mac's public key + endpoint...
-   AllowedIPs = 10.0.0.1/32
-   ```
-
-3. From a peer, use `http://10.0.0.1:3456/mcp` in the config above.
-
-> Whichever VPN you use, the bearer token is still required — the VPN controls *who can reach the
-> port*, and the token controls *who can use the server*.
-
----
-
-## Manual / advanced setup
-
-`ical serve setup` automates all of this. Here's what it does by hand, if you want to run the
-server some other way.
+The server handles many concurrent clients and reconnects; each MCP session is isolated.
 
 <details>
-<summary>Run the HTTP server manually (env token)</summary>
-
-Start it by hand to try it out:
+<summary>Run the HTTP server by hand instead</summary>
 
 ```bash
-export CALENDAR_MCP_TOKEN="$(openssl rand -hex 16)"   # generate a token
-ical mcp --http                                       # listens on 127.0.0.1:3456
+export CALENDAR_MCP_TOKEN="$(openssl rand -hex 16)"
+ical mcp --http                                   # listens on 127.0.0.1:3456
+ical mcp --http --host 100.x.y.z --port 3456      # bind elsewhere
 ```
 
-Add `--host <ip>` / `--port <n>` (or the env vars from the
-[configuration reference](#configuration-reference)) to bind elsewhere.
-
-Check it's up (a request **without** the token should be rejected with `401`):
-
-```bash
-curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:3456/mcp \
-  -H 'Accept: application/json, text/event-stream' -d '{}'      # → 401
-```
-
-> ⚠️ There is deliberately **no `brew services` integration**: a brew-managed service plist is
-> regenerated on upgrade, which would wipe any environment injected with `launchctl setenv` and
-> leave the fail-closed server down. For anything persistent, use `ical serve setup` — its token
-> *file* plus user-owned LaunchAgent survive reboots and `brew upgrade`; it's the supported path.
+Without a token from any source the server refuses to start. There is deliberately no
+`brew services` integration: a brew-managed plist is regenerated on upgrade and would lose any
+injected environment, leaving the fail-closed server down. `ical serve setup` is the supported
+persistent path.
 
 </details>
 
----
+## Troubleshooting
+
+### Calendar permission
+
+| Symptom | Fix |
+|---|---|
+| `Calendar access denied` | System Settings → Privacy & Security → Calendars, enable access for the app that ran the command (Terminal, iTerm, Claude, ...), then retry. |
+| `permission dialog was never answered` / access request timed out | A dialog is waiting on screen, or the call came from a background process that can't show one. Run `ical today` in Terminal on the Mac and click Allow Full Access. |
+| A remote client gets `Calendar access denied` | On the Mac: run `ical today` in Terminal and approve if asked, restart the server with `launchctl kickstart -k gui/$(id -u)/com.apple-calendar-mcp`, then retry. If it still fails, check System Settings → Privacy & Security → Calendars. |
+| Permission lost after rebuilding from source | You skipped the `codesign` step. See [Build from source](#build-from-source). |
+
+### Networked server
+
+| Symptom | Fix |
+|---|---|
+| `Could not get a Tailscale IP` | Tailscale isn't installed or up on the Mac. Run `tailscale up`, or pass `--host <ip>` instead. |
+| `serve setup` says the server did NOT come up | Read `~/Library/Logs/apple-calendar.log`. Usually another agent owns the port (setup names it and prints the command to stop it), or the VPN IP wasn't ready yet. Fix that and re-run setup. |
+| `ical serve status` shows down after `brew upgrade` | The upgrade removed the old binary under the running server and it doesn't always come back on its own. `launchctl kickstart -k gui/$(id -u)/com.apple-calendar-mcp`, or re-run `ical serve setup --tailscale`. |
+| `The server is bound to loopback` | Setup ran without `--tailscale` or `--host`. Re-run with one. |
+| `Refusing to start: no auth token found` | You ran `ical mcp --http` by hand with no token. Run `ical serve setup`, or set `CALENDAR_MCP_TOKEN`. |
+
+### Connecting clients
+
+| Symptom | Fix |
+|---|---|
+| Client gets `401 Unauthorized` | Token mismatch. Re-copy it with `ical serve token show <client> \| pbcopy`, check `ical serve token list`, and confirm the header is exactly `Authorization: Bearer <token>`. |
+| `serve connect`: `claude CLI was not found on <host>` (exit 40) | Install Claude Code on that machine, or make sure `claude` is on its login-shell `PATH`. |
+| `serve connect`: `could not reach the server over the tailnet` (exit 41) | That machine can't open `http://<mac-ip>:3456`, or has no `curl`. Check `tailscale status` on both ends and any firewall. |
+| `serve connect`: `ssh to <host> failed` (exit 255) | Key-based ssh isn't set up. Make `ssh <host>` work non-interactively, or use `--print` and paste the command yourself. |
+| Claude Desktop can't launch the server | GUI apps don't see your shell `PATH`. Use the absolute path from `which ical` in `"command"`. |
+| `Calendar 'X' not found` | Exact name mismatch. The error lists your calendars; `ical calendars` shows them too. |
+
+### Install
+
+| Symptom | Fix |
+|---|---|
+| Homebrew says `ical` is "shadowed", or the wrong `ical` runs | Another binary named `ical` is earlier on your `PATH`. `which -a ical` shows them; remove the other one or call `$(brew --prefix)/bin/ical`. |
+| `swift test` fails with no `XCTest` module | The Command Line Tools can build but not test. Use Xcode: `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test`. |
 
 ## Configuration reference
 
-| Setting | Env var | Default | Notes |
+| Setting | Env var | Flag | Default |
 |---|---|---|---|
-| Token | `CALENDAR_MCP_TOKEN` | — | HTTP mode needs a token from **some** source — this env var, the token file below, or a client token; compared in constant time |
-| Token file | `CALENDAR_MCP_TOKEN_FILE` | `~/.config/apple-calendar/token` | the legacy shared/default token; overrides the default path; `serve setup` writes it |
-| Client tokens | — | `~/.config/apple-calendar/tokens/<client>` | one file per client, managed by `ical serve token` / `serve connect`; unioned with the sources above |
-| Bind address | `CALENDAR_MCP_HOST` | `127.0.0.1` | set to your VPN IP to allow remote clients |
-| Port | `CALENDAR_MCP_PORT` | `3456` | |
+| Token | `CALENDAR_MCP_TOKEN` | | none |
+| Token file | `CALENDAR_MCP_TOKEN_FILE` | | `~/.config/apple-calendar/token` |
+| Client tokens | | | `~/.config/apple-calendar/tokens/<client>` |
+| Bind address | `CALENDAR_MCP_HOST` | `--host` | `127.0.0.1` |
+| Port | `CALENDAR_MCP_PORT` | `--port` | `3456` |
+| Disable auth | | `--no-auth` | off |
 
-All token sources are a **union** — the env token, the default file, and every named client file
-in `tokens/` are valid at once; any of them authorizes a request.
+All token sources are unioned: the env token, the default token file, and every file in
+`tokens/` are valid at once, and any of them authorizes a request. Tokens are compared in
+constant time. Token files are re-read on demand (at most every 5 seconds), so `token add`
+and `token revoke` never need a restart.
 
-On the command line: `--host`, `--port`, and `--no-auth` (run without a token — see the
-security model below).
-
----
+`--no-auth` only consults `CALENDAR_MCP_TOKEN`; if that is set, auth stays on. With nothing
+set, anyone who can reach the port can read and change your calendar. Use it only on an
+isolated interface.
 
 ## Security model
 
-- **Read *and* write.** The tool can query events and also create, update, and delete them. There
-  is no read-only mode — anyone who can call the server can change your calendar, so treat access
-  to it (and its token) accordingly.
-- **Token required, fail-closed.** The HTTP server won't start without a resolvable token from
-  any source, and rejects any request whose `Authorization: Bearer …` header doesn't match
-  (constant-time compare). Because the HTTP server also exposes the write tools, keeping tokens
-  secret matters more than ever.
-- **Per-client tokens, unioned.** The env token, the default token file, and every named file in
-  `~/.config/apple-calendar/tokens/` are all valid at once — any of them authorizes a request, and
-  each is checked with the same constant-time comparison. Every session is logged with the client
-  it matched (`session <id> client=<name>` in `~/Library/Logs/apple-calendar.log`), and revoking a
-  token (`ical serve token revoke <client>`) takes effect on a running server within ~5 seconds —
-  no restart. If every token is revoked, the server rejects every request.
-- **No built-in encryption.** HTTP mode is plain HTTP — only run it on a trusted private network
-  (loopback or a VPN), never on the public internet.
-- **macOS permission, pinned to the binary.** Calendar access is granted by macOS per code
-  identity. The binary is signed with a stable identifier (`com.apple-calendar-mcp.cli`) so the
-  grant survives upgrades — you approve it once.
+- Read and write. There is no read-only mode. Anyone who can call the server can change your
+  calendar, so treat the token like a password.
+- Fail-closed. The HTTP server won't start without a token and rejects any request whose
+  bearer header doesn't match one. If you revoke every token, it rejects every request.
+- Per-client tokens. Each machine gets its own credential (`tokens/<client>`, mode 600).
+  Revoke one and the others keep working; the running server notices within about 5 seconds.
+  Every session is logged with the client that opened it.
+- No transport encryption. It's plain HTTP. Run it on loopback or inside a VPN, never on the
+  public internet.
+- macOS permission pinned to the binary. Calendar access is granted per code identity. The
+  binary is signed as `com.apple-calendar-mcp.cli` so one approval survives every upgrade.
 
----
+## Uninstall
+
+```bash
+ical serve uninstall --purge       # stop and remove the LaunchAgent, delete all tokens
+brew uninstall apple-calendar
+brew untap hunterbrewer04/tap            # optional
+rm -f ~/Library/Logs/apple-calendar.log
+```
+
+To revoke the Calendar permission too: System Settings → Privacy & Security → Calendars.
 
 ## Build from source
 
@@ -422,32 +446,50 @@ git clone https://github.com/hunterbrewer04/apple-calendar-mcp.git
 cd apple-calendar-mcp
 swift build -c release
 codesign -s - --identifier com.apple-calendar-mcp.cli --force .build/release/apple-calendar
+.build/release/apple-calendar today
 ```
 
-Re-run the `codesign` step after **every** rebuild — the stable identity is what keeps the
-calendar permission valid across recompiles. (Homebrew does this for you automatically.)
+Re-run the `codesign` step after every rebuild. The stable identity is what keeps the Calendar
+permission valid across recompiles; Homebrew does this for you.
 
-> A full Swift toolchain runs the test suite (`swift test`). The Command Line Tools alone can
-> build and run the binary but can't run the tests; they run in CI on every push.
+Tests need a full Xcode install (the Command Line Tools have no `XCTest`):
 
----
+```bash
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
+```
+
+CI runs the suite in both debug and release on every push. It can't exercise live EventKit
+reads (a runner has no Calendar permission), so those are checked by running the binary locally.
+
+## Claude Code skill
+
+[`skill/SKILL.md`](skill/SKILL.md) teaches Claude Code on the Mac to answer calendar questions
+by shelling out to `ical`: which command fits which question, how to find an event id before
+editing, and what each error means. Install it by symlinking the folder from a clone of this
+repo:
+
+```bash
+mkdir -p ~/.claude/skills && ln -s "$(pwd)/skill" ~/.claude/skills/apple-calendar
+```
+
+It's for the Mac that has `ical` installed. A Claude Code session on another machine should
+use the MCP tools over the network instead.
 
 ## How it works
 
 ```
-ical <subcommand>   →  CLI ───────┐
-ical mcp            →  stdio MCP ──┼─→  shared EventKit store  →  macOS calendar DB  (~100 ms)
-ical mcp --http     →  HTTP MCP ───┘      (read + write)
+ical <subcommand>   →  CLI ─────────┐
+ical mcp            →  stdio MCP ───┼─→  shared EventKit store  →  macOS calendar DB  (~100 ms)
+ical mcp --http     →  HTTP MCP ────┘      (read + write)
                           ▲
                           └─ bearer token, fail-closed
 ```
 
-A single EventKit store feeds both front-ends. The MCP layer uses the official
+A single EventKit store feeds all three front-ends. The MCP layer uses the official
 [Swift MCP SDK](https://github.com/modelcontextprotocol/swift-sdk) for the protocol and the
 `stdio` transport, with a [Hummingbird](https://github.com/hummingbird-project/hummingbird)-backed
-transport for the token-gated HTTP server.
-
----
+transport for the token-gated HTTP server. Each HTTP client gets its own MCP session; when the
+session table fills, the least-recently-used ones are evicted.
 
 ## License
 

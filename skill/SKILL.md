@@ -27,7 +27,7 @@ to run several (e.g., `today` then `week`) to answer a question well.
 - `ical` must be installed and on `PATH` (`brew install hunterbrewer04/tap/apple-calendar`).
 - macOS Calendar (TCC) permission for the calling context — macOS may show a one-time
   permission dialog on first use; tell the user to click "Allow Full Access".
-- Source lives in `~/Code/apple-calendar-mcp/`. Rebuilds from source MUST re-run the codesign
+- If you rebuild from source, you MUST re-run the codesign
   step (`codesign -s - --identifier com.apple-calendar-mcp.cli --force <bin>`), or install via
   Homebrew, which codesigns automatically — the stable identity is what keeps the calendar
   permission valid across recompiles.
