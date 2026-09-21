@@ -103,6 +103,25 @@ final class SessionManagerTests: XCTestCase {
         }
     }
 
+    func testCloseAllDropsEverySessionAndRefusesNewOnes() async throws {
+        let manager = SessionManager(store: MockCalendarStore(), maxSessions: 4)
+        let a = try await initialize(manager)
+        _ = try await initialize(manager)
+
+        await manager.closeAll()
+        let count = await manager.count
+        XCTAssertEqual(count, 0)
+        let aStatus = await toolsList(manager, session: a)
+        XCTAssertEqual(aStatus, 404)
+
+        let refused = await manager.handle(
+            MCP.HTTPRequest(method: "POST", headers: Self.postHeaders, body: Self.initializeBody, path: "/mcp"),
+            client: "test")
+        XCTAssertEqual(refused.statusCode, 503)
+        let after = await manager.count
+        XCTAssertEqual(after, 0)
+    }
+
     func testDeleteFreesSlotWithoutEvicting() async throws {
         let manager = SessionManager(store: MockCalendarStore(), maxSessions: 2)
         let a = try await initialize(manager)

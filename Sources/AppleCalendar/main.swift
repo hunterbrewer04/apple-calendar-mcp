@@ -35,15 +35,7 @@ if argv.first == "mcp" {
     if mcpArgs.contains("--http") {
         let config = ServerConfig.fromEnvironment(ProcessInfo.processInfo.environment, argv: mcpArgs)
         do { try config.validate() } catch {
-            FileHandle.standardError.write("""
-            Refusing to start: no auth token found. Provide one via any of:
-              • run `ical serve setup` (writes ~/.config/apple-calendar/token), or
-              • run `ical serve token add <client>` (writes ~/.config/apple-calendar/tokens/<client>), or
-              • set CALENDAR_MCP_TOKEN, or
-              • set CALENDAR_MCP_TOKEN_FILE to a file containing the token, or
-              • create ~/.config/apple-calendar/token.
-            Or pass --no-auth to run without auth (NOT recommended).
-            """.appending("\n").data(using: .utf8)!)
+            FileHandle.standardError.write(Data("Refusing to start: \(error)\n".utf8))
             exit(1)
         }
         if config.allowNoAuth {

@@ -115,4 +115,19 @@ final class AuthTests: XCTestCase {
         let bad = config(argv: ["--port", "notanumber"])
         XCTAssertEqual(bad.port, 3456)
     }
+    func testMaxSessionsFlagBeatsEnvBeatsDefault() {
+        let env = ["CALENDAR_MCP_MAX_SESSIONS": "34"]
+        XCTAssertEqual(config(env: env, argv: ["--max-sessions", "12"]).maxSessions, 12)
+        XCTAssertEqual(config(env: env).maxSessions, 34)
+        XCTAssertEqual(config().maxSessions, 256)
+    }
+    func testBadMaxSessionsFailsValidation() {
+        // Token present so the cap check is the one that fires.
+        for bad in ["0", "-3", "abc"] {
+            let c = config(env: ["CALENDAR_MCP_TOKEN": "t"], argv: ["--max-sessions", bad])
+            XCTAssertThrowsError(try c.validate(), bad) { XCTAssertEqual($0 as? StartupError, .invalidMaxSessions) }
+        }
+        XCTAssertEqual("\(StartupError.invalidMaxSessions)",
+                       "--max-sessions / CALENDAR_MCP_MAX_SESSIONS must be a whole number of at least 1.")
+    }
 }

@@ -46,6 +46,17 @@ final class CLIParsingTests: XCTestCase {
     func testCalendars() {
         XCTAssertEqual(CLI.parse(["calendars"]).command, .calendars)
     }
+    func testVersionParsesAndRunsWithoutTouchingTheStore() {
+        XCTAssertEqual(CLI.parse(["version"]).command, .version)
+        XCTAssertEqual(CLI.parse(["--version"]).command, .version)
+        // A store that denies access proves `version` never calls ensureAccess.
+        let store = MockCalendarStore()
+        store.accessGranted = false
+        let r = CLI.run(["version"], store: store)
+        XCTAssertEqual(r.stdout, "ical \(AppVersion.current)")
+        XCTAssertNil(r.stderr)
+        XCTAssertEqual(r.exitCode, 0)
+    }
 
     // MARK: - Write subcommands
 
