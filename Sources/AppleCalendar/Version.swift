@@ -4,5 +4,5 @@
 /// Homebrew formula builds from a git tag. Bump this in the same commit that gets tagged
 /// `vX.Y.Z` so the running server and the installed formula agree.
 enum AppVersion {
-    static let current = "1.4.2"
+    static let current = "1.4.3"
 }
